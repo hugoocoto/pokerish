@@ -1,0 +1,7 @@
+[submodule "PokerHandEvaluator"]
+	path = PokerHandEvaluator
+	url = https://github.com/HenryRLee/PokerHandEvaluator
+
+[submodule "raylib"]
+	path = raylib
+	url = https://github.com/raysan5/raylib.git
