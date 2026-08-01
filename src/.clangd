@@ -1,3 +1,2 @@
 CompileFlags:
-  Add: [-I../PokerHandEvaluator/cpp/include]
- 
+  Add: [-I../raylib/src, -I../PokerHandEvaluator/cpp/include]
