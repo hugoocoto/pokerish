@@ -1,12 +1,13 @@
-#include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
-#include <vector>
 
 #include "card.h"
 #include "poker.h"
 #include "raylib.h"
+#include "server.h"
 
 struct {
         int width{ 800 };
@@ -24,7 +25,7 @@ draw_card(const phevaluator::Card &pc, int x, int y)
 
 static void
 draw_player(const Table &table, const Game_State &state, size_t idx,
-            int x, int y, int screen_h, double now)
+            int x, int y, int screen_h, double now, const std::string &waiting_name)
 {
         const Player &p = table.players[idx];
         if (!p.hand.has_value()) return;
@@ -41,11 +42,18 @@ draw_player(const Table &table, const Game_State &state, size_t idx,
         int tx = x + cw - nw / 2;
         DrawText(p.name.c_str(), tx, y - 4 - 20, 20, WHITE);
 
+        if (!waiting_name.empty()) {
+                char wbuf[64] = { 0 };
+                snprintf(wbuf, sizeof(wbuf) - 1, "Waiting: %s", waiting_name.c_str());
+                int wtx = x + cw - MeasureText(wbuf, 20) / 2;
+                DrawText(wbuf, wtx, y - 4 - 40, 20, ORANGE);
+        }
+
         if (idx == (size_t) state.dealer) {
-                int cx = x - 12;
-                int cy = y - 12;
-                DrawCircle(cx, cy, 10, WHITE);
-                DrawText("D", cx - MeasureText("D", 20) / 2, cy - 10, 20, BLACK);
+                int cx = x - 13;
+                int cy = y - 13;
+                DrawCircleLines(cx, cy, 12, WHITE);
+                DrawText("D", cx - MeasureText("D", 20) / 2, cy - 10, 20, WHITE);
         }
 
         size_t sb = (state.dealer + 1) % table.players.size();
@@ -88,7 +96,8 @@ draw_player(const Table &table, const Game_State &state, size_t idx,
                 DrawText("Fold", tx, y + ch / 2 - 10, 20, WHITE);
                 DrawRectangleLines(x, y + ch / 2 - 15, banner_w, 30, WHITE);
         } else if (p.is_my_turn) {
-                float len = banner_w * (ActionTimeOut - (now - p.action_start)) / ActionTimeOut;
+                float len = banner_w * (table.action_timeout - (now - p.action_start)) /
+                            table.action_timeout;
                 Color bg  = GREEN;
                 Color bg1 = BLACK;
                 bg.a      = bg.a * 0.75;
@@ -102,11 +111,26 @@ draw_player(const Table &table, const Game_State &state, size_t idx,
                 Color bg = BLACK;
                 switch (p.last_action.type) {
                 case Player::Response::NONE: break;
-                case Player::Response::FOLD: bg = BLACK; snprintf(buf, sizeof(buf) - 1, "Fold"); break;
-                case Player::Response::CHECK: bg = DARKGRAY; snprintf(buf, sizeof(buf) - 1, "Check"); break;
-                case Player::Response::CALL: bg = BLUE; snprintf(buf, sizeof(buf) - 1, "Call %d", p.last_action.amount); break;
-                case Player::Response::CALL_ALL: bg = RED; snprintf(buf, sizeof(buf) - 1, "All-in %d", p.last_action.amount); break;
-                case Player::Response::BET: bg = ORANGE; snprintf(buf, sizeof(buf) - 1, "Bet %d", p.last_action.amount); break;
+                case Player::Response::FOLD:
+                        bg = BLACK;
+                        snprintf(buf, sizeof(buf) - 1, "Fold");
+                        break;
+                case Player::Response::CHECK:
+                        bg = DARKGRAY;
+                        snprintf(buf, sizeof(buf) - 1, "Check");
+                        break;
+                case Player::Response::CALL:
+                        bg = BLUE;
+                        snprintf(buf, sizeof(buf) - 1, "Call %d", p.last_action.amount);
+                        break;
+                case Player::Response::CALL_ALL:
+                        bg = RED;
+                        snprintf(buf, sizeof(buf) - 1, "All-in %d", p.last_action.amount);
+                        break;
+                case Player::Response::BET:
+                        bg = ORANGE;
+                        snprintf(buf, sizeof(buf) - 1, "Bet %d", p.last_action.amount);
+                        break;
                 }
                 bg.a = bg.a * 0.75;
                 tx   = banner_cx - MeasureText(buf, 20) / 2;
@@ -117,7 +141,8 @@ draw_player(const Table &table, const Game_State &state, size_t idx,
 }
 
 static void
-draw_table(Table &table, Game_State &state, int w, int h, double now)
+draw_table(Table &table, Game_State &state, int w, int h, double now,
+           const std::vector<std::string> &waiting)
 {
         assert(table.players.size() == (size_t) MaxPlayers);
 
@@ -140,7 +165,8 @@ draw_table(Table &table, Game_State &state, int w, int h, double now)
         py[5] = h - ch - ch / 2;
 
         for (size_t i = 0; i < table.players.size(); i++) {
-                draw_player(table, state, i, px[i], py[i], h, now);
+                draw_player(table, state, i, px[i], py[i], h, now,
+                            i < waiting.size() ? waiting[i] : std::string());
         }
 
         // common card slots
@@ -158,7 +184,7 @@ draw_table(Table &table, Game_State &state, int w, int h, double now)
         char buf[128] = { 0 };
         snprintf(buf, sizeof(buf) - 1, "Pot: %d", table.pot);
         int tx = (w - MeasureText(buf, 20)) / 2;
-        DrawText(buf, tx, my - 40, 20, YELLOW);
+        DrawText(buf, tx, my - 40, 20, ORANGE);
 
         if (state.current_bet > 0 && state.stage != OVER) {
                 snprintf(buf, sizeof(buf) - 1, "Current bet: %d", state.current_bet);
@@ -174,9 +200,7 @@ draw_table(Table &table, Game_State &state, int w, int h, double now)
         if (state.stage == OVER) {
                 DrawText(table.result_text.c_str(),
                          (w - MeasureText(table.result_text.c_str(), 20)) / 2,
-                         my - 100, 20, GREEN);
-                const char *hint = "Press SPACE or N to start the next hand";
-                DrawText(hint, (w - MeasureText(hint, 20)) / 2, my + ch + margin, 20, GRAY);
+                         my - 100, 20, WHITE);
         }
 }
 
@@ -194,10 +218,49 @@ build_themed_cards(std::map<int, Card> &out, const std::string &path)
         }
 }
 
-void
-game_loop(Table *table)
+int
+main(int argc, char **argv)
 {
-        static Game_State state;
+        int port         = 9000;
+        const char *host = "127.0.0.1"; // loopback by default; --host 0.0.0.0 for LAN
+        const char *token = nullptr;
+        bool headless    = false;
+        for (int i = 1; i < argc; i++) {
+                if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+                        port = atoi(argv[++i]);
+                } else if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
+                        host = argv[++i];
+                } else if (strcmp(argv[i], "--token") == 0 && i + 1 < argc) {
+                        token = argv[++i];
+                } else if (strcmp(argv[i], "--headless") == 0) {
+                        headless = true;
+                } else {
+                        fprintf(stderr,
+                                "usage: %s [--port N] [--host IP] [--token SECRET] [--headless]\n",
+                                argv[0]);
+                        return 1;
+                }
+        }
+
+        Server srv(port, host, token);
+
+        if (headless) {
+                srv.run();
+                return 0;
+        }
+
+        build_themed_cards(themed_cards, "decks/jorels");
+
+        SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+        SetTraceLogLevel(LOG_WARNING);
+        InitWindow(ctx.width, ctx.height, ctx.title);
+
+        // cd to the executable path so relative paths works fine; when built
+        // into server/build/ the deck images live up to two levels up
+        ChangeDirectory(GetApplicationDirectory());
+        for (int i = 0; i < 4 && !DirectoryExists("decks"); i++) {
+                ChangeDirectory("..");
+        }
 
         while (!WindowShouldClose()) {
                 if (IsWindowResized()) {
@@ -206,46 +269,16 @@ game_loop(Table *table)
                 }
 
                 double now = GetTime();
-
-                if (state.stage == OVER && (IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_N))) {
-                        table->end_hand(&state);
-                }
-
-                table->step_game(&state, now);
+                srv.tick(now);
 
                 BeginDrawing();
                 {
                         ClearBackground(BLACK);
-                        draw_table(*table, state, ctx.width, ctx.height, now);
+                        draw_table(srv.table(), srv.state(), ctx.width, ctx.height, now,
+                                   srv.waiting_names());
                 }
                 EndDrawing();
         }
-}
-
-int
-main(int argc, char **argv)
-{
-        Deck deck   = Deck();
-        Table table = Table(&deck);
-
-        table.add_player(Player("You"));
-        table.add_player(Player("Bot 1"));
-        table.add_player(Player("Bot 2"));
-        table.add_player(Player("Bot 3"));
-        table.add_player(Player("Bot 4"));
-        table.add_player(Player("Bot 5"));
-
-        build_themed_cards(themed_cards, "decks/jorels");
-
-        SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
-        SetTraceLogLevel(LOG_WARNING);
-        InitWindow(ctx.width, ctx.height, ctx.title);
-
-        // cd to the executable path so relative paths works fine
-        ChangeDirectory(GetApplicationDirectory());
-
-        game_loop(&table);
 
         return 0;
-        (void) argc, (void) argv;
 }

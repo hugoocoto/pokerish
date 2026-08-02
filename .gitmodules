@@ -1,7 +1,10 @@
 [submodule "PokerHandEvaluator"]
-	path = PokerHandEvaluator
+	path = thirdparty/PokerHandEvaluator
 	url = https://github.com/HenryRLee/PokerHandEvaluator
 
 [submodule "raylib"]
-	path = raylib
+	path = thirdparty/raylib
 	url = https://github.com/raysan5/raylib.git
+[submodule "nlohmann"]
+	path = thirdparty/nlohmann
+	url = https://github.com/nlohmann/json

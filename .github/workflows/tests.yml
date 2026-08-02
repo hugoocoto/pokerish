@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebsockets-dev libcap-dev libsystemd-dev
+
+      - name: Build and run tests
+        run: make test

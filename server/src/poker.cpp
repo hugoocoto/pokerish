@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <random>
-#include <unistd.h>
 
 static std::mt19937 g_rng(std::random_device{}());
 
@@ -63,12 +62,6 @@ Player::ask_for_action(const Game_State *state)
 {
         this->clear_response();
         this->response.has_response = true;
-
-
-        sleep(1);
-        double r = poker_random();
-        if (r < 0.5) return;
-
 
         int to_call = state->current_bet - this->_street_bet;
         bool strong = this->rank.value() > 0 && this->rank.value() < 2000;
@@ -236,6 +229,7 @@ Table::end_hand(Game_State *state)
         this->pot = 0;
         this->common.clear();
         this->winners.clear();
+        this->win_amount.clear();
         this->award = 0;
         this->result_text.clear();
         this->deck->cards.clear();
@@ -266,6 +260,7 @@ Table::start_betting_round(Game_State *state)
                 p._street_bet = 0;
                 p.has_acted   = false;
                 p.last_action = {};
+                p.clear_response();
         }
 
         int first = 0;
@@ -321,7 +316,7 @@ Table::step_betting_round(Game_State *state, double now)
                 return;
         }
 
-        if (now - p.action_start > ActionTimeOut) {
+        if (now - p.action_start > this->action_timeout) {
                 printf("%s: timeout, folds\n", p.name.c_str());
                 p._fold = true;
                 p.clear_response();
@@ -377,7 +372,7 @@ Table::process_action(Game_State *state, Player &p)
                         }
                 }
                 this->commit_chips(p, amount - p._street_bet);
-                state->current_bet = amount;
+                state->current_bet = std::max(state->current_bet, amount);
                 p.has_acted        = true;
                 break;
         }
@@ -457,9 +452,11 @@ Table::finish_hand(Game_State *state)
         state->round_done = true;
 
         this->winners.clear();
+        this->win_amount.clear();
         this->award = 0;
-        this->pot   = 0;
         this->result_text.clear();
+        // `pot` is left as the committed total so it stays visible during
+        // the hand-over pause; end_hand() zeroes it for the next hand
 
         int survivor = -1;
         for (size_t i = 0; i < this->players.size(); i++) {
@@ -474,6 +471,7 @@ Table::finish_hand(Game_State *state)
                         this->award += p._bet;
                 }
                 this->winners.push_back(survivor);
+                this->win_amount.push_back(this->award);
                 this->players[survivor].stack += this->award;
                 this->result_text = this->players[survivor].name + " wins " +
                                     std::to_string(this->award) + " (fold)";
@@ -556,15 +554,17 @@ Table::award_pots()
                         if (i == tied[0]) w += remainder;
                         this->players[i].stack += w;
                         this->award += w;
-                        if (std::find(this->winners.begin(), this->winners.end(), i) == this->winners.end()) {
+                        auto it = std::find(this->winners.begin(), this->winners.end(), i);
+                        if (it == this->winners.end()) {
                                 this->winners.push_back(i);
+                                this->win_amount.push_back(w);
+                        } else {
+                                this->win_amount[it - this->winners.begin()] += w;
                         }
                 }
 
                 prev = v;
         }
-
-        this->pot = 0; // everything was distributed from the _bet totals
 }
 
 void

@@ -1,2 +1,19 @@
+# build artifacts
+build/
+server/build/
+bot/example/build/
+test/build/
+*.o
 a.out
-build
+
+# editor / tooling
+.vscode/
+.idea/
+*.swp
+*.swo
+compile_commands.json
+.cache/
+
+# core dumps
+core
+core.*

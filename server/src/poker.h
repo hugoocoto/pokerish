@@ -114,7 +114,10 @@ class Table
         std::vector<phevaluator::Card> common;
         int pot{ 0 };
 
+        double action_timeout{ ActionTimeOut }; // seconds; timeout folds
+
         std::vector<int> winners; // indexes of the winning players (last hand)
+        std::vector<int> win_amount; // per-winner winnings, parallel to winners
         int award{ 0 };           // total chips awarded (last hand)
         std::string result_text;
 

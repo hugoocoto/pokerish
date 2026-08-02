@@ -1,0 +1,2 @@
+CompileFlags:
+  Add: [-I../../thirdparty/raylib/src, -I../../thirdparty/PokerHandEvaluator/cpp/include, -I../../thirdparty/nlohmann/single_include]

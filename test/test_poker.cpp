@@ -1,4 +1,4 @@
-#include "../src/poker.h"
+#include "../server/src/poker.h"
 
 #include <algorithm>
 #include <array>
@@ -192,6 +192,8 @@ test_fold_walk_off()
         CHECK_EQ((int)t.winners.size(), 1);
         CHECK_EQ(t.winners[0], 2);
         CHECK_EQ(t.award, SmallBlind + BigBlind);
+        CHECK_EQ(t.win_amount[0], t.award);
+        CHECK_EQ(t.pot, t.award); // pot stays visible through the hand-over pause
         CHECK_EQ(t.players[2].stack, StartStack - BigBlind + SmallBlind + BigBlind);
 }
 
@@ -268,7 +270,9 @@ test_side_pots()
         CHECK_EQ(t.players[2].stack, 900);
         CHECK_EQ(t.award, 450);
         CHECK_EQ((int)t.winners.size(), 2);
-        CHECK_EQ(t.pot, 0);
+        CHECK_EQ(t.win_amount[0], 250); // exact per-winner amounts, not a split
+        CHECK_EQ(t.win_amount[1], 200);
+        CHECK_EQ(t.pot, 450); // final pot stays visible until end_hand
 }
 
 static void
@@ -305,6 +309,8 @@ test_tie_split()
         CHECK_EQ(t.players[1].stack, 900 + 300);
         CHECK_EQ(t.award, 600);
         CHECK_EQ((int)t.winners.size(), 2);
+        CHECK_EQ(t.win_amount[0], 300);
+        CHECK_EQ(t.win_amount[1], 300);
 }
 
 static void

@@ -1,52 +1,51 @@
-OUT            = a.out
-SRC            = $(wildcard src/*.cpp)
-HEADERS        = $(wildcard src/*.h)
-OBJ_DIR        = build
-OBJ            = $(SRC:src/%.cpp=$(OBJ_DIR)/%.o)
+# Umbrella: delegates to the server/ and bot/ projects, builds and runs the
+# tests (the only things that still live at the root).
 
-CXX            = g++
-FLAGS          = -Wall -Wextra -ggdb
+CXX     = g++
+FLAGS   = -Wall -Wextra -ggdb
+FLAGS  += -Iserver/src
+FLAGS  += -Ithirdparty/PokerHandEvaluator/cpp/include
+FLAGS  += -Ithirdparty/nlohmann/single_include
 
-LIBPHEVAL_PATH = ./PokerHandEvaluator/cpp/build
-LIBPHEVAL      = $(LIBPHEVAL_PATH)/libpheval.a
-FLAGS         += -IPokerHandEvaluator/cpp/include
+LWS_LIBS = -lwebsockets -lcap -lsystemd
 
-RAYLIB_SRC     = raylib
-RAYLIB_BUILD   = $(RAYLIB_SRC)/build
-RAYLIB_LIB     = $(RAYLIB_BUILD)/raylib/libraylib.a
-FLAGS         += -I$(RAYLIB_SRC)/src
+.DEFAULT_GOAL := all
 
-TEST_SRC       = tests/test_poker.cpp
-TEST_BIN       = $(OBJ_DIR)/test_poker
+include deps.mk
 
-.PHONY: all test
+TEST_POKER_BIN  = test/build/test_poker
+TEST_PROTO_BIN  = test/build/test_proto
+TEST_SERVER_BIN = test/build/test_server
 
-all: $(OUT)
+.PHONY: all server bot test clean distclean
 
-$(OBJ_DIR)/%.o: src/%.cpp $(HEADERS)
-	@mkdir -p $(OBJ_DIR)
-	$(CXX) $(FLAGS) -c $< -o $@
+all: server
 
-$(OUT): $(OBJ) $(LIBPHEVAL) $(RAYLIB_LIB)
-	$(CXX) $(FLAGS) $^ -o $@
+server:
+	$(MAKE) -C server
 
-$(TEST_BIN): $(TEST_SRC) $(OBJ_DIR)/poker.o $(LIBPHEVAL)
-	$(CXX) $(FLAGS) $(TEST_SRC) $(OBJ_DIR)/poker.o $(LIBPHEVAL) -o $@
+bot:
+	$(MAKE) -C bot/example
 
-test: $(TEST_BIN)
-	./$(TEST_BIN)
+$(TEST_POKER_BIN): test/test_poker.cpp server/src/poker.cpp $(PHEVAL_LIB)
+	@mkdir -p $(dir $@)
+	$(CXX) $(FLAGS) test/test_poker.cpp server/src/poker.cpp $(PHEVAL_LIB) -o $@
 
-$(LIBPHEVAL):
-	cd ./PokerHandEvaluator/cpp && cmake -B build
-	cmake --build $(LIBPHEVAL_PATH) --target pheval
+$(TEST_PROTO_BIN): test/test_proto.cpp server/src/proto.cpp server/src/poker.cpp $(PHEVAL_LIB)
+	@mkdir -p $(dir $@)
+	$(CXX) $(FLAGS) test/test_proto.cpp server/src/proto.cpp server/src/poker.cpp $(PHEVAL_LIB) -o $@
 
-$(RAYLIB_LIB):
-	mkdir -p $(RAYLIB_BUILD)
-	cmake -S $(RAYLIB_SRC) -B $(RAYLIB_BUILD) \
-		-DCMAKE_BUILD_TYPE=Release \
-		-DPLATFORM=Desktop \
-		-DUSE_WAYLAND=ON \
-		-DGLFW_BUILD_WAYLAND=ON \
-		-DGLFW_BUILD_X11=OFF \
-		-DBUILD_LIBTYPE=STATIC
-	make -C $(RAYLIB_BUILD) -j$$(nproc)
+$(TEST_SERVER_BIN): test/test_server.cpp server/src/server.cpp server/src/proto.cpp server/src/poker.cpp $(PHEVAL_LIB)
+	@mkdir -p $(dir $@)
+	$(CXX) $(FLAGS) test/test_server.cpp server/src/server.cpp server/src/proto.cpp server/src/poker.cpp $(PHEVAL_LIB) $(LWS_LIBS) -o $@
+
+test: $(TEST_POKER_BIN) $(TEST_PROTO_BIN) $(TEST_SERVER_BIN)
+	./$(TEST_POKER_BIN)
+	./$(TEST_PROTO_BIN)
+	./$(TEST_SERVER_BIN)
+
+clean:
+	rm -rf server/build bot/example/build test/build
+
+distclean: clean
+	rm -rf $(PHEVAL_PATH) $(RAYLIB_BUILD)

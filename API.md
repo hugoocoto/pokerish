@@ -5,8 +5,12 @@ Protocol for connecting remote clients to the poker server.
 - Transport: WebSocket.
 - Encoding: JSON (UTF-8), one JSON object per message.
 - Keys: lowercase snake_case.
-- One connection = one seat: the server assigns a seat on `hello` and
-  afterwards treats that connection as the player sitting there.
+- One connection = one seat. Seat changes only happen at the end of a
+  round: `hello` reserves a free (bot) seat and the server replies
+  `queued`; when the current round ends the bot is replaced and the
+  server sends `welcome`, after which the connection is bound to the
+  seat. Clients leaving mid-hand are folded; a bot takes the seat over
+  at the end of the round.
 
 ## Envelope
 
@@ -36,9 +40,24 @@ Join the game and request a seat.
 
     { "type": "hello", "name": "Alice" }
 
-The server replies with `welcome`, or with `error` `table_full` when
-the table is already full. After `hello` the connection is bound to the
-assigned seat.
+The server replies with `queued` when a bot seat is free, or with
+`error` `table_full` when the table is already full. The seat is
+reserved, but the bot playing it finishes the current round; when the
+round ends the server sends `welcome` and the seat is yours (with a
+full entry stack, not the bot's chips). Until then the connection is
+not bound to a seat: `action` and `query` are rejected with
+`unauthorized`.
+
+When the server is started with `--token SECRET` (or a token is set in
+tests), `hello` must carry the same token:
+
+    { "type": "hello", "name": "Alice", "token": "SECRET" }
+
+A missing or wrong token is rejected with `error` `bad_token`. Without
+`--token` any token (or none) is accepted.
+
+`name` is truncated to 24 characters and control characters are
+stripped before it is stored or broadcast.
 
 ## action
 
@@ -108,7 +127,9 @@ client can `query` any public information at any time.
 
 ## welcome
 
-Replies to `hello`.
+Sent when the client's reserved seat is actually taken over, at the end
+of the round in which the client sent `hello`. Until this message
+arrives the client is not seated.
 
     {
       "type": "welcome",
@@ -116,6 +137,17 @@ Replies to `hello`.
       "player_id": 0,
       "seat": 0,
       "name": "Alice"
+    }
+
+## queued
+
+Replies to `hello` when a bot seat is free: the seat is reserved and
+the bot plays out the rest of the current round. `welcome` follows at
+the end of the round.
+
+    {
+      "type": "queued",
+      "seat": 3
     }
 
 ## state
@@ -190,6 +222,8 @@ Sent to the player whose turn it is, when the turn starts.
   must act before it.
 - If the player does not answer before the deadline, the server folds
   them automatically and broadcasts `action` with `reason` `"timeout"`.
+- When the turn changes, the server also broadcasts a fresh `state`
+  message to all clients, so everyone can track who is acting.
 
 ## action
 
@@ -244,7 +278,10 @@ Broadcast once per finished hand.
     }
 
 - `winners` is an array of `{ seat, amount }`: side pots and splits
-  produce several entries.
+  produce several entries. `amount` is the exact per-winner winnings
+  (with side pots, amounts differ per winner); `award` is their total.
+- `state.pot` keeps the final pot value during the hand-over pause and
+  is reset when the next hand starts.
 - The next hand starts after a short pause; a new `state` broadcast
   announces it.
 
@@ -284,6 +321,7 @@ Reply to `ping`.
 | `game_over`     | action sent while the hand is over                    |
 | `table_full`    | `hello` when the table is full                        |
 | `unauthorized`  | message without a valid seat assignment               |
+| `bad_token`     | `hello` with a wrong or missing token (server started with `--token`) |
 
 ---
 
@@ -300,6 +338,15 @@ Reply to `ping`.
   broadcasts the fold with `reason` `"timeout"`. The timeout therefore
   protects the game from any kind of invalid or missing client
   response.
+- Resource limits (protect the server from misbehaving clients):
+  - at most 64 simultaneous connections; extra clients are closed at
+    the handshake;
+  - incoming messages are capped at 64 KB (larger ones are rejected
+    with `bad_request`);
+  - a client that stops reading gets dropped once ~512 KB of messages
+    pile up in its send queue;
+  - bet/raise `amount` values above 100,000,000 are rejected with
+    `bad_request`.
 
 ---
 
@@ -309,9 +356,14 @@ A small hand, server "S", clients 0 (Alice) and 1 (Bob). State
 payloads are abbreviated as `{ ... }`.
 
     C0: { "type": "hello", "name": "Alice" }
-    S:  { "type": "welcome", "game_id": 1, "player_id": 0, "seat": 0, "name": "Alice" }
+    S:  { "type": "queued", "seat": 0 }                      // bot finishes the round
 
     C1: { "type": "hello", "name": "Bob" }
+    S:  { "type": "queued", "seat": 1 }
+
+    ...current round ends; the bots are replaced at full entry stacks...
+
+    S:  { "type": "welcome", "game_id": 1, "player_id": 0, "seat": 0, "name": "Alice" }
     S:  { "type": "welcome", "game_id": 1, "player_id": 1, "seat": 1, "name": "Bob" }
 
     S:  { "type": "state", "stage": "preflop", "dealer": 1, "turn": 0,
