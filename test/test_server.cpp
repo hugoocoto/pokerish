@@ -70,16 +70,18 @@ wait_until(F f, double timeout)
         return f();
 }
 
-// Server in a thread; 1 s action timeout for fast tests.
+// Server in a thread; short action timeout and hand pause for fast tests.
 class ScopedServer
 {
     public:
         explicit ScopedServer(int port, const char *token = nullptr)
-                : srv_(port, "127.0.0.1", token)
+                : srv_(port, "127.0.0.1", token, /*verbose=*/false)
         {
-                srv_.table().action_timeout = 1;
+                srv_.table().action_timeout = 0.2;
+                srv_.hand_pause()           = 0.01;
                 th_ = std::thread([this] { srv_.run(); });
         }
+        Server &srv() { return srv_; }
         ~ScopedServer()
         {
                 srv_.stop();
@@ -92,11 +94,13 @@ class ScopedServer
 };
 
 static std::vector<Bot *>
-make_clients(int port, int n, bool auto_play, bool send_hello = true)
+make_clients(int port, int n, bool auto_play, bool send_hello = true,
+             double think_seconds = 0.0)
 {
         std::vector<Bot *> cs;
         for (int i = 0; i < n; i++) {
-                cs.push_back(new Bot(g_ctx, "127.0.0.1", port, i, auto_play, send_hello));
+                cs.push_back(new Bot(g_ctx, "127.0.0.1", port, i, auto_play, send_hello,
+                                     nullptr, nullptr, think_seconds));
         }
         return cs;
 }
@@ -139,8 +143,8 @@ turn_seat(const std::vector<Bot *> &cs)
 }
 
 // The seat currently acting, or nullptr. The bots never act on their own in
-// these tests, so a turn lasts until its 1 s timeout; re-read it before each
-// interaction.
+// these tests, so a turn lasts until its short timeout; re-read it before
+// each interaction.
 static Bot *
 current_turn(const std::vector<Bot *> &cs)
 {
@@ -388,8 +392,9 @@ test_tick_timeout()
         // verify a silent remote client is folded when its action times out.
         // The other 5 seats are auto bots that answer instantly.
         int port = find_free_port();
-        Server srv(port, "127.0.0.1");
-        srv.table().action_timeout = 1;
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false);
+        srv.table().action_timeout = 0.2;
+        srv.hand_pause()           = 0.01;
 
         // The client context has no ticker, so lws_service(g_ctx) would block
         // indefinitely once the socket goes quiet and stall this loop. Wake it
@@ -404,7 +409,7 @@ test_tick_timeout()
         });
 
         Bot *silent = new Bot(g_ctx, "127.0.0.1", port, 0, false);
-        double end = Bot::now() + 10.0; // first bot-only round + 3 s pause precede the join
+        double end = Bot::now() + 10.0; // the first bot-only round precedes the join
         while (Bot::now() < end && silent->seat() < 0) {
                 srv.tick(Bot::now());
                 lws_service(g_ctx, 10);
@@ -498,9 +503,10 @@ test_bot_e2e()
 
         CHECK(wait_until([&] { return all_seated(cs); }, 10.0));
 
+        // stop as soon as two hands completed (no fixed wall-clock window)
         int hand_overs = 0;
-        double end = Bot::now() + 30.0;
-        while (Bot::now() < end) {
+        double end = Bot::now() + 10.0;
+        while (Bot::now() < end && hand_overs < 2) {
                 lws_service(g_ctx, 10);
                 double t = Bot::now();
                 for (Bot *b : cs) {
@@ -512,8 +518,9 @@ test_bot_e2e()
         }
         CHECK(hand_overs > 0);
 
-        // chips + pot stay constant (one snapshot: same for all); during the
-        // hand-over pause `pot` mirrors already-awarded chips, so skip it
+        // chips + pot stay constant (one snapshot: same for all), except that
+        // busted players are rebought to StartStack; during the hand-over
+        // pause `pot` mirrors already-awarded chips, so skip it
         int sum = 0;
         const nlohmann::json &st = cs[0]->last_state();
         if (st.contains("players")) {
@@ -522,7 +529,8 @@ test_bot_e2e()
                 }
                 if (!st.value("hand_over", false)) sum += st.value("pot", 0);
         }
-        CHECK_EQ(sum, 6000);
+        CHECK(sum >= 6000);
+        CHECK((sum - 6000) % StartStack == 0);
 }
 
 static void
@@ -548,6 +556,11 @@ test_end_of_round_join()
                 was_over = over;
                 return overs >= 3;
         }, 30.0));
+
+        // ensure a hand is actively in progress so the join is queued mid-round
+        CHECK(wait_until([&] {
+                return ss.srv().state().hand_started && !ss.srv().state().hand_over;
+        }, 5.0));
 
         late->send_json({ { "type", "hello" }, { "name", "Late" } });
         CHECK(wait_until([&] {
@@ -682,21 +695,94 @@ test_hello_name_sanitized()
         CHECK(seated_name.find('\n') == std::string::npos);
 }
 
+static void
+run_test(const char *name, void (*fn)())
+{
+        double t0 = Bot::now();
+        fn();
+        printf("  %-24s %.2f s\n", name, Bot::now() - t0);
+}
+
+static void
+test_bust_kick()
+{
+        // A client that busts (0 chips) is disconnected at the round end and
+        // its seat reverts to an auto bot (rebought to StartStack).
+        int port = find_free_port();
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false);
+        srv.table().action_timeout = 0.2;
+        srv.hand_pause()           = 0.01;
+
+        std::atomic<bool> ticker_run{ true };
+        std::thread ticker([&] {
+                while (ticker_run.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                        lws_cancel_service(g_ctx);
+                }
+        });
+
+        Bot *b = new Bot(g_ctx, "127.0.0.1", port, 0, false, true, nullptr, "Buster");
+        double end = Bot::now() + 10.0;
+        while (Bot::now() < end && b->seat() < 0) {
+                srv.tick(Bot::now());
+                lws_service(g_ctx, 10);
+        }
+        CHECK(b->seat() >= 0);
+        int seat = b->seat();
+
+        // force a bust: the seat's chips go to zero
+        srv.table().players[seat].stack = 0;
+
+        // the next round end must kick the client and hand the seat to a bot
+        bool kicked = false;
+        end = Bot::now() + 10.0;
+        while (Bot::now() < end && !kicked) {
+                srv.tick(Bot::now());
+                lws_service(g_ctx, 10);
+                kicked = !b->connected();
+        }
+        CHECK(kicked);
+        CHECK(srv.table().players[seat].auto_play);
+        CHECK_EQ(srv.table().players[seat].stack, StartStack);
+
+        ticker_run.store(false);
+        ticker.join();
+        srv.stop();
+        delete b;
+}
+
+static void
+test_custom_config()
+{
+        int port = find_free_port();
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
+                   /*tournament=*/false, /*level_seconds=*/300, /*countdown=*/10,
+                   /*start_stack=*/500, /*max_players=*/4);
+        CHECK_EQ(srv.state().start_stack, 500);
+        CHECK_EQ(srv.state().max_players, 4);
+        CHECK_EQ(srv.table().players.size(), 4);
+        for (const auto &p : srv.table().players) {
+                CHECK_EQ(p.stack, 500);
+        }
+}
+
 int
 main()
 {
         g_ctx = bot_context();
         CHECK(g_ctx != nullptr);
 
-        test_join_and_welcome();
-        test_protocol_errors();
-        test_tick_timeout();
-        test_hand_flow();
-        test_bot_e2e();
-        test_end_of_round_join();
-        test_bad_token();
-        test_bet_amount_bounds();
-        test_hello_name_sanitized();
+        run_test("join_and_welcome", test_join_and_welcome);
+        run_test("protocol_errors", test_protocol_errors);
+        run_test("tick_timeout", test_tick_timeout);
+        run_test("hand_flow", test_hand_flow);
+        run_test("bot_e2e", test_bot_e2e);
+        run_test("end_of_round_join", test_end_of_round_join);
+        run_test("bad_token", test_bad_token);
+        run_test("bet_amount_bounds", test_bet_amount_bounds);
+        run_test("hello_name_sanitized", test_hello_name_sanitized);
+        run_test("bust_kick", test_bust_kick);
+        run_test("custom_config", test_custom_config);
 
         lws_context_destroy(g_ctx);
 

@@ -100,7 +100,7 @@ class Bot:
             self.decide_at = asyncio.get_running_loop().time() + 1.0
         elif msg_type == "state":
             self.state = msg
-        elif msg_type in ("action", "stage", "hand_over"):
+        elif msg_type in ("action", "stage", "hand_over", "tournament_start", "level", "player_out", "tournament_over"):
             if "state" in msg:
                 self.state = msg["state"]
             if msg_type == "action":
@@ -109,6 +109,24 @@ class Bot:
                       + (f" ({reason})" if reason else ""))
             elif msg_type == "hand_over":
                 print(f"   {self.name}: {msg.get('result', '')}")
+            elif msg_type == "tournament_start":
+                blinds = msg.get("blinds", {})
+                sb = blinds.get("small", 5)
+                bb = blinds.get("big", 10)
+                ante = blinds.get("ante", 0)
+                print(f"   {self.name}: == Tournament Started! Level {msg.get('level', 1)} (Blinds {sb}/{bb}, Ante {ante}) ==")
+            elif msg_type == "level":
+                blinds = msg.get("blinds", {})
+                sb = blinds.get("small", 5)
+                bb = blinds.get("big", 10)
+                ante = blinds.get("ante", 0)
+                print(f"   {self.name}: == Level Up! Level {msg.get('level', 1)} (Blinds {sb}/{bb}, Ante {ante}) ==")
+            elif msg_type == "player_out":
+                print(f"   {self.name}: == P{msg.get('seat', -1)} eliminated ({msg.get('reason', 'out')}) ==")
+            elif msg_type == "tournament_over":
+                winner = msg.get("winner", {})
+                winner_name = winner.get("name", "?") if isinstance(winner, dict) else "?"
+                print(f"   {self.name}: == Tournament Over! {winner_name} wins {msg.get('award', 0)} chips! ==")
         elif msg_type == "error":
             code = msg.get("code", "")
             print(f"   {self.name}: error {code}")

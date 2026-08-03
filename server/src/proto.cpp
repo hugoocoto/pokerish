@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
+#include <utility>
 
 namespace proto {
 
@@ -186,6 +187,8 @@ action_name(Player::Response::ResponseType t)
 std::string
 card_name(const phevaluator::Card &c)
 {
+        int id = (int) c;
+        if (id < 0 || id >= 52) return "??";
         return c.describeCard();
 }
 
@@ -219,11 +222,39 @@ state_json(const Table &table, const Game_State &state, int game_id)
         j["hand_over"]       = state.hand_over;
         j["common"]          = common_json(table);
         j["timeout_seconds"] = table.action_timeout;
+        j["start_stack"]     = state.start_stack;
+        j["max_players"]     = state.max_players;
+        j["mode"]            = state.tournament ? "tournament" : "cash";
+        {
+                std::pair<int, int> bl = table.blind_seats(state.dealer);
+                j["blinds"] = { { "small", state.small_blind },
+                                { "big", state.big_blind },
+                                { "ante", state.ante },
+                                { "small_seat", bl.first },
+                                { "big_seat", bl.second } };
+        }
+
+        if (state.tournament) {
+                const char *status = "lobby";
+                switch (state.tournament_status) {
+                case T_LOBBY: status = "lobby"; break;
+                case T_COUNTDOWN: status = "countdown"; break;
+                case T_RUNNING: status = "running"; break;
+                case T_FINISHED: status = "finished"; break;
+                }
+                int alive = table.alive_count();
+
+                j["level"]                      = state.level;
+                j["level_seconds_remaining"]    = state.level_remaining;
+                j["countdown_seconds_remaining"] = state.countdown_remaining;
+                j["status"]                     = status;
+                j["players_alive"]              = alive;
+        }
 
         nlohmann::json players = nlohmann::json::array();
         for (size_t i = 0; i < table.players.size(); i++) {
                 const Player &p = table.players[i];
-                players.push_back({
+                nlohmann::json pl = {
                         { "seat", (int) i },
                         { "name", p.name },
                         { "stack", p.stack },
@@ -232,10 +263,18 @@ state_json(const Table &table, const Game_State &state, int game_id)
                         { "folded", p._fold },
                         { "has_acted", p.has_acted },
                         { "all_in", p.is_all_in },
+                        { "busted", p.busted },
                         { "last_action", { { "type", action_name(p.last_action.type) },
                                            { "amount", p.last_action.amount } } },
                         { "is_turn", p.is_my_turn },
-                });
+                };
+                if (state.hand_started && (state.hand_over || state.stage == OVER) && !p.busted && !p._fold && p.hand.has_value()) {
+                        pl["cards"] = nlohmann::json::array({
+                                card_name(p.hand->at(0)),
+                                card_name(p.hand->at(1))
+                        });
+                }
+                players.push_back(pl);
         }
         j["players"] = players;
         return j;

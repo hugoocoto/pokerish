@@ -28,19 +28,50 @@ draw_player(const Table &table, const Game_State &state, size_t idx,
             int x, int y, int screen_h, double now, const std::string &waiting_name)
 {
         const Player &p = table.players[idx];
-        if (!p.hand.has_value()) return;
+        int cw          = default_card_size.width;
+        int ch          = default_card_size.height;
+        int margin      = 8;
+        int banner_w    = 2 * cw + margin;
 
-        const Card &c0 = themed_cards.at(int(p.hand->at(0)));
-        int cw         = c0.get_w();
-        int ch         = c0.get_h();
-        int margin     = 8;
+        bool is_winner = (state.tournament_status == T_FINISHED && !p.busted);
+
+        if (p.busted) {
+                // empty seat (lobby) or eliminated player: two card outlines + name (OUT)
+                std::string label = p.name.empty() ? "Empty" : (p.name + " (OUT)");
+                int tx            = x + (banner_w - MeasureText(label.c_str(), 20)) / 2;
+                DrawText(label.c_str(), tx, y - 4 - 20, 20, GRAY);
+
+                DrawRectangleLinesEx({ .x = (float) x, .y = (float) y, .width = (float) cw, .height = (float) ch }, 2, DARKGRAY);
+                DrawRectangleLinesEx({ .x = (float) (x + cw + margin), .y = (float) y, .width = (float) cw, .height = (float) ch }, 2, DARKGRAY);
+                return;
+        }
+
+        if (!p.hand.has_value()) {
+                std::string label = is_winner ? (p.name + " (WINNER)") : p.name;
+                int nw = MeasureText(label.c_str(), 20);
+                int tx = x + cw - nw / 2;
+                DrawText(label.c_str(), tx, y - 4 - 20, 20, is_winner ? GOLD : WHITE);
+
+                DrawRectangleLinesEx({ .x = (float) x, .y = (float) y, .width = (float) cw, .height = (float) ch }, 2, is_winner ? GOLD : DARKGRAY);
+                DrawRectangleLinesEx({ .x = (float) (x + cw + margin), .y = (float) y, .width = (float) cw, .height = (float) ch }, 2, is_winner ? GOLD : DARKGRAY);
+
+                char sbuf[64] = { 0 };
+                snprintf(sbuf, sizeof(sbuf) - 1, "Chips: %d", p.stack);
+                int stx = x + cw - MeasureText(sbuf, 20) / 2;
+                DrawText(sbuf, stx, y + ch + 4 + 20, 20, is_winner ? GOLD : GRAY);
+                return;
+        }
 
         draw_card(p.hand->at(0), x, y);
         draw_card(p.hand->at(1), x + cw + margin, y);
+        if (is_winner) {
+                DrawRectangleLinesEx({ .x = (float) x - 2, .y = (float) y - 2, .width = (float) (2 * cw + margin + 4), .height = (float) (ch + 4) }, 2, GOLD);
+        }
 
-        int nw = MeasureText(p.name.c_str(), 20);
+        std::string display_name = is_winner ? (p.name + " (WINNER)") : p.name;
+        int nw = MeasureText(display_name.c_str(), 20);
         int tx = x + cw - nw / 2;
-        DrawText(p.name.c_str(), tx, y - 4 - 20, 20, WHITE);
+        DrawText(display_name.c_str(), tx, y - 4 - 20, 20, is_winner ? GOLD : WHITE);
 
         if (!waiting_name.empty()) {
                 char wbuf[64] = { 0 };
@@ -56,8 +87,9 @@ draw_player(const Table &table, const Game_State &state, size_t idx,
                 DrawText("D", cx - MeasureText("D", 20) / 2, cy - 10, 20, WHITE);
         }
 
-        size_t sb = (state.dealer + 1) % table.players.size();
-        size_t bb = (state.dealer + 2) % table.players.size();
+        std::pair<int, int> bl = table.blind_seats(state.dealer);
+        size_t sb = (size_t) bl.first;
+        size_t bb = (size_t) bl.second;
         if (idx == sb) DrawText("SB", tx - 34, y - 4 - 20, 20, RED);
         if (idx == bb) DrawText("BB", tx + nw + 12, y - 4 - 20, 20, RED);
 
@@ -85,14 +117,13 @@ draw_player(const Table &table, const Game_State &state, size_t idx,
         }
 
         // banners span both cards, including the margin between them
-        int banner_w  = 2 * cw + margin;
         int banner_cx = x + (2 * cw + margin) / 2;
 
         if (p._fold) {
-                Color bg = BLACK;
-                bg.a     = bg.a * 0.75;
-                tx       = banner_cx - MeasureText("Fold", 20) / 2;
-                DrawRectangle(x, y + ch / 2 - 15, banner_w, 30, bg);
+                // soft dark tint so hole cards/card backs remain 100% visible underneath
+                DrawRectangle(x, y, banner_w, ch, Color{ 0, 0, 0, 110 });
+                tx = banner_cx - MeasureText("Fold", 20) / 2;
+                DrawRectangle(x, y + ch / 2 - 15, banner_w, 30, Color{ 0, 0, 0, 180 });
                 DrawText("Fold", tx, y + ch / 2 - 10, 20, WHITE);
                 DrawRectangleLines(x, y + ch / 2 - 15, banner_w, 30, WHITE);
         } else if (p.is_my_turn) {
@@ -141,10 +172,10 @@ draw_player(const Table &table, const Game_State &state, size_t idx,
 }
 
 static void
-draw_table(Table &table, Game_State &state, int w, int h, double now,
+draw_table(const Table &table, const Game_State &state, int w, int h, double now,
            const std::vector<std::string> &waiting)
 {
-        assert(table.players.size() == (size_t) MaxPlayers);
+        assert(table.players.size() <= (size_t) MaxPlayers);
 
         float cw = default_card_size.width;
         float ch = default_card_size.height;
@@ -168,8 +199,6 @@ draw_table(Table &table, Game_State &state, int w, int h, double now,
                 draw_player(table, state, i, px[i], py[i], h, now,
                             i < waiting.size() ? waiting[i] : std::string());
         }
-
-        // common card slots
         int margin = 8;
         float my   = (h - ch) / 2;
         float mx   = (w - cw * 5 - margin * 4) / 2;
@@ -192,15 +221,79 @@ draw_table(Table &table, Game_State &state, int w, int h, double now,
                 DrawText(buf, tx, my - 64, 20, GRAY);
         }
 
-        static const char *stage_names[] = { "Preflop", "Flop", "Turn", "River", "Hand over" };
-        if (state.stage >= PREFLOP && state.stage <= OVER) {
-                DrawText(stage_names[state.stage], 10, 10, 20, DARKGRAY);
-        }
-
         if (state.stage == OVER) {
                 DrawText(table.result_text.c_str(),
                          (w - MeasureText(table.result_text.c_str(), 20)) / 2,
                          my - 100, 20, WHITE);
+        }
+
+        // tournament HUD: level, time left in the level, blinds, players left
+        if (state.tournament) {
+                int alive = table.alive_count();
+                int secs = (int) state.level_remaining;
+
+                int hud_x = 15;
+                int hud_y = (h - 62) / 2;
+                DrawRectangle(hud_x - 6, hud_y - 4, 122, 62, Color{ 20, 20, 20, 200 });
+                DrawRectangleLines(hud_x - 6, hud_y - 4, 122, 62, DARKGRAY);
+
+                snprintf(buf, sizeof(buf) - 1, "Level %d  %d:%02d", state.level, secs / 60,
+                         secs % 60);
+                DrawText(buf, hud_x, hud_y, 16, WHITE);
+
+                if (state.ante > 0) {
+                        snprintf(buf, sizeof(buf) - 1, "Blinds %d/%d A:%d",
+                                 state.small_blind, state.big_blind, state.ante);
+                } else {
+                        snprintf(buf, sizeof(buf) - 1, "Blinds %d/%d", state.small_blind,
+                                 state.big_blind);
+                }
+                DrawText(buf, hud_x, hud_y + 20, 14, GRAY);
+
+                snprintf(buf, sizeof(buf) - 1, "Players %d/%d", alive, MaxPlayers);
+                DrawText(buf, hud_x, hud_y + 38, 14, GRAY);
+
+                // full-screen overlays for the tournament lifecycle
+                if (state.tournament_status == T_LOBBY) {
+                        snprintf(buf, sizeof(buf) - 1, "Waiting for players: %d/%d", alive,
+                                 MaxPlayers);
+                        DrawText(buf, (w - MeasureText(buf, 40)) / 2, h / 2 - 60, 40, YELLOW);
+                } else if (state.tournament_status == T_COUNTDOWN) {
+                        snprintf(buf, sizeof(buf) - 1, "Tournament starts in %.1fs",
+                                 state.countdown_remaining);
+                        DrawText(buf, (w - MeasureText(buf, 40)) / 2, h / 2 - 60, 40, YELLOW);
+                } else if (state.tournament_status == T_FINISHED) {
+                        int box_w = 420;
+                        int box_h = 170;
+                        int box_x = (w - box_w) / 2;
+                        int box_y = (h - box_h) / 2;
+
+                        DrawRectangle(box_x, box_y, box_w, box_h, Color{ 15, 15, 20, 235 });
+                        DrawRectangleLines(box_x, box_y, box_w, box_h, GOLD);
+
+                        const char *hdr = "TOURNAMENT OVER";
+                        DrawText(hdr, box_x + (box_w - MeasureText(hdr, 28)) / 2, box_y + 16, 28, GOLD);
+
+                        const Player *winner = nullptr;
+                        for (const Player &p : table.players) {
+                                if (!p.busted) winner = &p;
+                        }
+
+                        std::string wname = winner ? winner->name : "Champion";
+                        snprintf(buf, sizeof(buf) - 1, "Winner: %s", wname.c_str());
+                        DrawText(buf, box_x + (box_w - MeasureText(buf, 24)) / 2, box_y + 54, 24, WHITE);
+
+                        int award = winner ? winner->stack : 0;
+                        if (award > 0) {
+                                snprintf(buf, sizeof(buf) - 1, "Earnings: %d Chips", award);
+                        } else {
+                                snprintf(buf, sizeof(buf) - 1, "Winner takes all!");
+                        }
+                        DrawText(buf, box_x + (box_w - MeasureText(buf, 22)) / 2, box_y + 88, 22, ORANGE);
+
+                        snprintf(buf, sizeof(buf) - 1, "Final Level: Level %d (Blinds %d/%d)", state.level, state.small_blind, state.big_blind);
+                        DrawText(buf, box_x + (box_w - MeasureText(buf, 18)) / 2, box_y + 124, 18, GRAY);
+                }
         }
 }
 
@@ -225,24 +318,66 @@ main(int argc, char **argv)
         const char *host = "127.0.0.1"; // loopback by default; --host 0.0.0.0 for LAN
         const char *token = nullptr;
         bool headless    = false;
+        bool tournament  = false;
+        int level_seconds = 300;
+        int countdown_seconds = 10;
+        int start_stack   = 1000;
+        int max_players   = 6;
+        const char *export_dir = "hands";
         for (int i = 1; i < argc; i++) {
                 if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
                         port = atoi(argv[++i]);
+                        if (port <= 0 || port > 65535) {
+                                fprintf(stderr, "error: --port must be in [1, 65535]\n");
+                                return 1;
+                        }
                 } else if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
                         host = argv[++i];
                 } else if (strcmp(argv[i], "--token") == 0 && i + 1 < argc) {
                         token = argv[++i];
                 } else if (strcmp(argv[i], "--headless") == 0) {
                         headless = true;
+                } else if (strcmp(argv[i], "--tournament") == 0) {
+                        tournament = true;
+                } else if (strcmp(argv[i], "--level-seconds") == 0 && i + 1 < argc) {
+                        level_seconds = atoi(argv[++i]);
+                        if (level_seconds < 1) {
+                                fprintf(stderr, "error: --level-seconds must be >= 1\n");
+                                return 1;
+                        }
+                } else if (strcmp(argv[i], "--countdown-seconds") == 0 && i + 1 < argc) {
+                        countdown_seconds = atoi(argv[++i]);
+                        if (countdown_seconds < 0) {
+                                fprintf(stderr, "error: --countdown-seconds must be >= 0\n");
+                                return 1;
+                        }
+                } else if (strcmp(argv[i], "--start-stack") == 0 && i + 1 < argc) {
+                        start_stack = atoi(argv[++i]);
+                        if (start_stack < 1) {
+                                fprintf(stderr, "error: --start-stack must be >= 1\n");
+                                return 1;
+                        }
+                } else if ((strcmp(argv[i], "--max-players") == 0 || strcmp(argv[i], "--table-size") == 0) && i + 1 < argc) {
+                        max_players = atoi(argv[++i]);
+                        if (max_players < 2 || max_players > 6) {
+                                fprintf(stderr, "error: --max-players must be in [2, 6]\n");
+                                return 1;
+                        }
+                } else if ((strcmp(argv[i], "--export-dir") == 0 || strcmp(argv[i], "--hand-history") == 0) && i + 1 < argc) {
+                        export_dir = argv[++i];
                 } else {
                         fprintf(stderr,
-                                "usage: %s [--port N] [--host IP] [--token SECRET] [--headless]\n",
+                                "usage: %s [--port N] [--host IP] [--token SECRET]\n"
+                                "       [--headless] [--tournament] [--level-seconds N]\n"
+                                "       [--countdown-seconds N] [--start-stack N]\n"
+                                "       [--max-players N] [--export-dir DIR]\n",
                                 argv[0]);
                         return 1;
                 }
         }
 
-        Server srv(port, host, token);
+        Server srv(port, host, token, /*verbose=*/true, tournament, level_seconds,
+                   countdown_seconds, start_stack, max_players, export_dir);
 
         if (headless) {
                 srv.run();

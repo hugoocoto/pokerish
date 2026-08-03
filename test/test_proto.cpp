@@ -191,6 +191,8 @@ test_state_json()
         CHECK(j["round_done"] == false);
         CHECK(j["hand_over"] == false);
         CHECK_EQ(j["timeout_seconds"], 20);
+        CHECK_EQ(j["start_stack"], 1000);
+        CHECK_EQ(j["max_players"], 6);
         CHECK_EQ(j["common"].size(), 5);
         CHECK(j["common"][0] == "As");
         CHECK(j["common"][1] == "Kd");

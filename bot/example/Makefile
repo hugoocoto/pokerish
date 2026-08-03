@@ -6,6 +6,7 @@
 # client library (test/test_server.cpp #includes it directly).
 
 OUT   = build/example_bot
+OBJ   = build/bot.o
 SRC   = bot.cpp
 
 CXX   = g++
@@ -19,9 +20,12 @@ LWS_LIBS = -lwebsockets -lcap -lsystemd
 
 all: $(OUT)
 
-$(OUT): $(SRC)
+$(OUT): $(OBJ)
+	$(CXX) $(FLAGS) $(OBJ) $(LWS_LIBS) -o $@
+
+$(OBJ): $(SRC)
 	@mkdir -p $(dir $@)
-	$(CXX) $(FLAGS) $(SRC) $(LWS_LIBS) -o $@
+	$(CXX) $(FLAGS) -c $< -o $@
 
 clean:
 	rm -rf build

@@ -1,5 +1,6 @@
 OUT     = build/server
-SRC     = $(wildcard src/*.cpp)
+SRCS    = $(wildcard src/*.cpp)
+OBJS    = $(patsubst src/%.cpp,build/%.o,$(SRCS))
 HEADERS = $(wildcard src/*.h)
 
 CXX     = g++
@@ -15,10 +16,16 @@ LWS_LIBS = -lwebsockets -lcap -lsystemd
 
 include ../deps.mk
 
-.PHONY: all
+.PHONY: all clean
 
 all: $(OUT)
 
-$(OUT): $(SRC) $(HEADERS) $(PHEVAL_LIB) $(RAYLIB_LIB)
+$(OUT): $(OBJS) $(PHEVAL_LIB) $(RAYLIB_LIB)
+	$(CXX) $(FLAGS) $(OBJS) $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIBS) -o $@
+
+build/%.o: src/%.cpp $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CXX) $(FLAGS) $(SRC) $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIBS) -o $@
+	$(CXX) $(FLAGS) -c $< -o $@
+
+clean:
+	rm -rf build

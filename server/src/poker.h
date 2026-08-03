@@ -3,6 +3,7 @@
 #include <array>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "phevaluator/card.h"
@@ -22,6 +23,13 @@ enum Stage {
         OVER,
 };
 
+enum TournamentStatus {
+        T_LOBBY = 0,   // waiting for players to fill the seats
+        T_COUNTDOWN,   // all seats filled, countdown to the first hand
+        T_RUNNING,     // hands are being played
+        T_FINISHED,    // one player left, winner announced
+};
+
 struct Game_State {
         int stage{ PREFLOP }; // Stage
         int turn{ 0 };        // index of the player that has to do something
@@ -33,6 +41,26 @@ struct Game_State {
         bool round_done{ false };   // current street betting finished
         bool hand_started{ false }; // preflop dealt + blinds posted
         bool hand_over{ false };    // hand finished, result computed
+
+        // game configuration settings
+        int start_stack{ StartStack };
+        int max_players{ MaxPlayers };
+
+        // blinds of the current level (cash mode: the fixed defaults)
+        int small_blind{ SmallBlind };
+        int big_blind{ BigBlind };
+        int ante{ 0 };
+
+        // tournament mode; cash mode keeps the defaults and never touches these
+        bool tournament{ false };
+        int level{ 0 };                // current blind level, 1-based; 0 = not started
+        double level_seconds{ 300 };   // length of a level (seconds)
+        double level_started_at{ 0 };  // monotonic clock
+        double level_remaining{ 0 };   // seconds left in the level (server keeps it fresh)
+        int tournament_status{ T_LOBBY };
+        double countdown_seconds{ 0 };
+        double countdown_started_at{ 0 };
+        double countdown_remaining{ 0 };
 };
 
 double poker_random();
@@ -65,6 +93,7 @@ class Player
         bool is_my_turn{ false };
         double action_start{ 0 };
         bool auto_play{ true }; // bots answer instantly; humans don't (timeout)
+        bool busted{ false };   // tournament only: eliminated / empty seat (cash: never)
 
         struct Response {
                 bool has_response{ false };
@@ -126,6 +155,11 @@ class Table
         void add_player(Player p);
         int non_folded_count() const;
 
+        // tournament helpers: alive = not busted
+        int alive_count() const;
+        int next_alive_from(int from) const;
+        std::pair<int, int> blind_seats(int dealer) const; // { small, big } among alive seats
+
         // game engine steps
         void new_hand(Game_State *state);
         void end_hand(Game_State *state);
@@ -133,7 +167,7 @@ class Table
         void step_betting_round(Game_State *state, double now);
         void step_game(Game_State *state, double now);
         void finish_hand(Game_State *state);
-        void award_pots();
+        void award_pots(int dealer);
 
         void process_action(Game_State *state, Player &p);
         void recalc_player_hand_strength();

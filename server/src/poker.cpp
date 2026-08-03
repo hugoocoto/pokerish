@@ -72,11 +72,15 @@ Player::ask_for_action(const Game_State *state)
                 if (r < 0.75 || !strong) {
                         this->response.type = Response::CHECK;
                 } else {
-                        this->response.type          = Response::BET;
-                        int min_bet                  = (state->current_bet == 0) ? BigBlind : state->current_bet + state->min_raise;
-                        int raise                    = (int) (poker_random() * 3.0) * state->min_raise;
-                        this->response.as.bet.amount = std::min(min_bet + raise,
-                                                                this->stack + this->_street_bet);
+                        this->response.type = Response::BET;
+                        // Minimum legal total: 1 big blind for an open, or a
+                        // full re-raise increment when there is already a bet.
+                        int min_bet = (state->current_bet == 0)
+                                ? state->min_raise                            // open: 1 BB
+                                : state->current_bet + state->min_raise;      // re-raise
+                        int extra = (int)(poker_random() * 3.0) * state->min_raise; // 0..2 extra
+                        this->response.as.bet.amount = std::min(
+                                min_bet + extra, this->stack + this->_street_bet);
                 }
                 return;
         }
@@ -84,11 +88,12 @@ Player::ask_for_action(const Game_State *state)
         if (strong && to_call <= this->stack / 4) {
                 double r = poker_random();
                 if (r < 0.15) {
-                        this->response.type          = Response::BET;
-                        int min_bet                  = state->current_bet + state->min_raise;
-                        int raise                    = (int) (poker_random() * 3.0) * state->min_raise;
-                        this->response.as.bet.amount = std::min(min_bet + raise,
-                                                                this->stack + this->_street_bet);
+                        this->response.type = Response::BET;
+                        // minimum re-raise, then 0..2 extra increments
+                        int min_bet = state->current_bet + state->min_raise;
+                        int extra   = (int)(poker_random() * 3.0) * state->min_raise;
+                        this->response.as.bet.amount = std::min(
+                                min_bet + extra, this->stack + this->_street_bet);
                 } else {
                         this->response.type = Response::CALL;
                 }
@@ -155,9 +160,43 @@ Table::non_folded_count() const
 {
         int count = 0;
         for (const Player &p : this->players) {
-                if (!p._fold) count++;
+                if (!p.busted && !p._fold) count++;
         }
         return count;
+}
+
+int
+Table::alive_count() const
+{
+        int count = 0;
+        for (const Player &p : this->players) {
+                if (!p.busted) count++;
+        }
+        return count;
+}
+
+int
+Table::next_alive_from(int from) const
+{
+        size_t n = this->players.size();
+        for (size_t i = 1; i <= n; i++) {
+                int idx         = (int) ((from + (int) i) % (int) n);
+                const Player &p = this->players[idx];
+                if (!p.busted) return idx;
+        }
+        return -1;
+}
+
+std::pair<int, int>
+Table::blind_seats(int dealer) const
+{
+        if (this->alive_count() == 2) {
+                // heads-up: the button posts the small blind (and acts first preflop)
+                return { dealer, this->next_alive_from(dealer) };
+        }
+        int sb = this->next_alive_from(dealer);
+        int bb = this->next_alive_from(sb);
+        return { sb, bb };
 }
 
 int
@@ -167,7 +206,7 @@ Table::next_active_player(int from) const
         for (size_t i = 1; i <= n; i++) {
                 int idx         = (int) ((from + (int) i) % (int) n);
                 const Player &p = this->players[idx];
-                if (!p._fold && !p.is_all_in) return idx;
+                if (!p.busted && !p._fold && !p.is_all_in) return idx;
         }
         return -1;
 }
@@ -176,10 +215,9 @@ bool
 Table::needs_action(const Game_State *state) const
 {
         for (const Player &p : this->players) {
-                if (!p._fold && !p.is_all_in) {
-                        if (!p.has_acted || p._street_bet < state->current_bet) {
-                                return true;
-                        }
+                if (p.busted || p._fold || p.is_all_in) continue;
+                if (!p.has_acted || p._street_bet < state->current_bet) {
+                        return true;
                 }
         }
         return false;
@@ -205,7 +243,7 @@ Table::post_blind(Player &p, int amount)
 void
 Table::new_hand(Game_State *state)
 {
-        assert(this->players.size() == (size_t) MaxPlayers);
+        assert(!this->players.empty());
         this->deck->reset();
         state->hand_started = true;
         state->turn         = state->dealer;
@@ -217,11 +255,12 @@ Table::new_hand(Game_State *state)
 void
 Table::end_hand(Game_State *state)
 {
-        state->dealer       = (state->dealer + 1) % (int) this->players.size();
+        // the button moves clockwise to the next player still in the game
+        state->dealer       = this->next_alive_from(state->dealer);
         state->stage        = PREFLOP;
         state->turn         = state->dealer;
         state->current_bet  = 0;
-        state->min_raise    = BigBlind;
+        state->min_raise    = state->big_blind;
         state->round_done   = false;
         state->hand_started = false;
         state->hand_over    = false;
@@ -245,7 +284,15 @@ Table::end_hand(Game_State *state)
                 p.last_action = {};
                 p.hand.reset();
                 p.set_rank(phevaluator::Rank(0));
-                if (p.stack <= 0) p.stack = StartStack; // rebuy busted players
+                if (p.busted) continue; // dead seat: stays out
+                if (p.stack <= 0) {
+                        if (state->tournament) {
+                                p.busted = true; // eliminated, no rebuy
+                                p._fold  = true;
+                        } else {
+                                p.stack = state->start_stack; // cash: rebuy busted players
+                        }
+                }
         }
 }
 
@@ -253,7 +300,7 @@ void
 Table::start_betting_round(Game_State *state)
 {
         state->current_bet = 0;
-        state->min_raise   = BigBlind;
+        state->min_raise   = state->big_blind;
         state->round_done  = false;
 
         for (Player &p : this->players) {
@@ -263,19 +310,29 @@ Table::start_betting_round(Game_State *state)
                 p.clear_response();
         }
 
-        int first = 0;
         if (state->stage == PREFLOP) {
-                int sb = (state->dealer + 1) % (int) this->players.size();
-                int bb = (state->dealer + 2) % (int) this->players.size();
-                this->post_blind(this->players[sb], SmallBlind);
-                this->post_blind(this->players[bb], BigBlind);
-                state->current_bet = BigBlind;
-                first              = (bb + 1) % (int) this->players.size();
+                if (state->ante > 0) {
+                        for (Player &p : this->players) {
+                                if (p.busted) continue;
+                                this->commit_chips(p, state->ante);
+                        }
+                }
+                std::pair<int, int> bl = this->blind_seats(state->dealer);
+                int sb                 = bl.first;
+                int bb                 = bl.second;
+                this->post_blind(this->players[sb], state->small_blind);
+                this->post_blind(this->players[bb], state->big_blind);
+                state->current_bet = state->big_blind;
+                if (this->alive_count() == 2) {
+                        // heads-up: the button (small blind) acts first preflop
+                        state->turn = this->next_active_player(sb - 1);
+                } else {
+                        state->turn = this->next_active_player(bb);
+                }
         } else {
-                first = (state->dealer + 1) % (int) this->players.size();
+                state->turn = this->next_active_player(state->dealer);
         }
 
-        state->turn = this->next_active_player(first - 1);
         if (state->turn < 0 || !this->needs_action(state)) {
                 state->round_done = true;
         }
@@ -438,6 +495,7 @@ Table::shuffle_and_deal()
         this->deck->shuffle();
 
         for (Player &p : this->players) {
+                if (p.busted) continue;
                 phevaluator::Card c1 = this->deck->pick();
                 phevaluator::Card c2 = this->deck->pick();
                 p.hand.emplace(std::array<phevaluator::Card, 2>{ c1, c2 });
@@ -479,7 +537,7 @@ Table::finish_hand(Game_State *state)
         }
 
         this->recalc_player_hand_strength();
-        this->award_pots();
+        this->award_pots(state->dealer);
 
         if (this->winners.empty()) {
                 this->result_text = "Hand over: no pot";
@@ -497,7 +555,7 @@ Table::finish_hand(Game_State *state)
 }
 
 void
-Table::award_pots()
+Table::award_pots(int dealer)
 {
         std::vector<int> levels;
         for (const Player &p : this->players) {
@@ -549,9 +607,24 @@ Table::award_pots()
 
                 int split     = layer / (int) tied.size();
                 int remainder = layer % (int) tied.size();
+
+                // Odd chip goes to the first tied winner clockwise from the
+                // dealer (standard casino rule).
+                int remainder_seat = tied[0];
+                if (remainder > 0) {
+                        size_t n = this->players.size();
+                        for (size_t step = 1; step <= n; step++) {
+                                int candidate = (int)((dealer + (int) step) % (int) n);
+                                if (std::find(tied.begin(), tied.end(), candidate) != tied.end()) {
+                                        remainder_seat = candidate;
+                                        break;
+                                }
+                        }
+                }
+
                 for (int i : tied) {
                         int w = split;
-                        if (i == tied[0]) w += remainder;
+                        if (remainder > 0 && i == remainder_seat) w += remainder;
                         this->players[i].stack += w;
                         this->award += w;
                         auto it = std::find(this->winners.begin(), this->winners.end(), i);
@@ -570,6 +643,8 @@ Table::award_pots()
 void
 Table::step_game(Game_State *state, double now)
 {
+        // tournament hands only run while the tournament is running
+        if (state->tournament && state->tournament_status != T_RUNNING) return;
         switch (state->stage) {
         case PREFLOP:
                 if (!state->hand_started) {

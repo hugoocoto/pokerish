@@ -29,6 +29,18 @@
 #include <libwebsockets.h>
 #include <nlohmann/json.hpp>
 
+template <typename T>
+static T jval(const nlohmann::json &j, const char *key, const T &def) {
+        if (!j.is_object() || !j.contains(key)) return def;
+        const auto &val = j[key];
+        if (val.is_null()) return def;
+        try {
+                return val.get<T>();
+        } catch (...) {
+                return def;
+        }
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers: monotonic clock, RNG, random person name
 // ---------------------------------------------------------------------------
@@ -80,12 +92,15 @@ class Bot
         // `index` only tags the bot; `auto_play` bots decide on their own
         // (with a "thinking" delay), manual bots wait for take_messages().
         // `send_hello` bots say hello right after connecting.
+        // `think_seconds` is the thinking delay before an auto_play bot acts;
+        // 0 makes bots decide instantly (tests) instead of the default 1 s.
         Bot(lws_context *ctx, const char *host, int port, int index,
             bool auto_play = true, bool send_hello = true,
-            const char *token = nullptr, const char *name = nullptr)
+            const char *token = nullptr, const char *name = nullptr,
+            double think_seconds = 1.0)
         : ctx_(ctx), host_(host), port_(port), index_(index),
-          name_(name ? name : random_name()), token_(token ? token : ""),
-          auto_play_(auto_play), send_hello_(send_hello)
+          name_(name && name[0] ? name : random_name()), token_(token ? token : ""),
+          auto_play_(auto_play), send_hello_(send_hello), think_seconds_(think_seconds)
         {
                 connect();
         }
@@ -123,6 +138,7 @@ class Bot
         std::string token_;
         bool auto_play_;
         bool send_hello_;
+        double think_seconds_;
 
         lws *wsi_{ nullptr };
         bool established_{ false };
@@ -261,6 +277,12 @@ Bot::callback(lws *wsi, enum lws_callback_reasons reason, void *user, void *in, 
                 printf("%s: connection error\n", b->name_.c_str());
                 break;
 
+        case LWS_CALLBACK_CLIENT_CLOSED:
+                b->wsi_         = nullptr;
+                b->established_ = false;
+                printf("%s: connection closed\n", b->name_.c_str());
+                break;
+
         case LWS_CALLBACK_CLOSED:
                 b->wsi_         = nullptr;
                 b->established_ = false;
@@ -281,32 +303,59 @@ void
 Bot::on_message(const nlohmann::json &j)
 {
         inbox_.push_back(j);
-        std::string type = j.value("type", "");
+        std::string type = jval<std::string>(j, "type", "");
 
         if (type == "welcome") {
-                seat_ = j.value("seat", -1);
+                seat_ = jval<int>(j, "seat", -1);
                 printf("%s: joined as seat %d\n", name_.c_str(), seat_);
         } else if (type == "your_turn") {
                 thinking_  = true;
-                decide_at_ = now() + 1.0;
+                decide_at_ = now() + think_seconds_;
         } else if (type == "state") {
-                state_ = j;
-        } else if (type == "action" || type == "stage" || type == "hand_over") {
-                if (j.contains("state")) state_ = j["state"];
+                if (j.is_object()) state_ = j;
+        } else if (type == "action" || type == "stage" || type == "hand_over" ||
+                   type == "tournament_start" || type == "level" ||
+                   type == "player_out" || type == "tournament_over") {
+                if (j.contains("state") && j["state"].is_object()) state_ = j["state"];
                 if (type == "action") {
-                        std::string reason;
-                        if (j.contains("reason") && j["reason"].is_string()) {
-                                reason = j["reason"];
-                        }
-                        printf("   %s: P%d %s%s\n", name_.c_str(), j.value("seat", -1),
-                               j.value("action", "?").c_str(),
+                        std::string reason = jval<std::string>(j, "reason", "");
+                        printf("   %s: P%d %s%s\n", name_.c_str(), jval<int>(j, "seat", -1),
+                               jval<std::string>(j, "action", "?").c_str(),
                                reason.empty() ? "" : (" (" + reason + ")").c_str());
                 } else if (type == "hand_over") {
                         printf("   %s: %s\n", name_.c_str(),
-                               std::string(j.value("result", "")).c_str());
+                               jval<std::string>(j, "result", "").c_str());
+                } else if (type == "tournament_start") {
+                        int sb = 5, bb = 10, ante = 0;
+                        if (j.contains("blinds") && j["blinds"].is_object()) {
+                                sb   = jval<int>(j["blinds"], "small", 5);
+                                bb   = jval<int>(j["blinds"], "big", 10);
+                                ante = jval<int>(j["blinds"], "ante", 0);
+                        }
+                        printf("   %s: == Tournament Started! Level %d (Blinds %d/%d, Ante %d) ==\n",
+                               name_.c_str(), jval<int>(j, "level", 1), sb, bb, ante);
+                } else if (type == "level") {
+                        int sb = 5, bb = 10, ante = 0;
+                        if (j.contains("blinds") && j["blinds"].is_object()) {
+                                sb   = jval<int>(j["blinds"], "small", 5);
+                                bb   = jval<int>(j["blinds"], "big", 10);
+                                ante = jval<int>(j["blinds"], "ante", 0);
+                        }
+                        printf("   %s: == Level Up! Level %d (Blinds %d/%d, Ante %d) ==\n",
+                               name_.c_str(), jval<int>(j, "level", 1), sb, bb, ante);
+                } else if (type == "player_out") {
+                        printf("   %s: == P%d eliminated (%s) ==\n", name_.c_str(),
+                               jval<int>(j, "seat", -1), jval<std::string>(j, "reason", "out").c_str());
+                } else if (type == "tournament_over") {
+                        std::string winner_name = "?";
+                        if (j.contains("winner") && j["winner"].is_object()) {
+                                winner_name = jval<std::string>(j["winner"], "name", "?");
+                        }
+                        printf("   %s: == Tournament Over! %s wins %d chips! ==\n",
+                               name_.c_str(), winner_name.c_str(), jval<int>(j, "award", 0));
                 }
         } else if (type == "error") {
-                std::string code = j.value("code", "");
+                std::string code = jval<std::string>(j, "code", "");
                 printf("   %s: error %s\n", name_.c_str(), code.c_str());
                 thinking_ = false;
                 if (auto_play_ && (code == "bet_too_small" || code == "illegal_action")) {
@@ -328,8 +377,8 @@ Bot::pump(double t)
         if (!auto_play_ || !thinking_) return;
         if (t < decide_at_) return;
 
-        if (rand01() < 0.4) {
-                decide_at_ = t + 1.0; // indecision: keep "thinking"
+        if (think_seconds_ > 0 && rand01() < 0.4) {
+                decide_at_ = t + think_seconds_; // indecision: keep "thinking"
                 return;
         }
         thinking_ = false;
@@ -344,16 +393,16 @@ Bot::pump(double t)
 void
 Bot::choose_and_send()
 {
-        if (state_.empty() || !state_.contains("players")) return;
+        if (!state_.is_object() || !state_.contains("players") || !state_["players"].is_array()) return;
 
-        int current_bet = state_.value("current_bet", 0);
-        int min_raise   = state_.value("min_raise", 10);
+        int current_bet = jval<int>(state_, "current_bet", 0);
+        int min_raise   = jval<int>(state_, "min_raise", 10);
         int street      = 0;
         int stack       = 0;
-        for (auto &pl : state_["players"]) {
-                if (pl.value("seat", -1) == seat_) {
-                        street = pl.value("street_bet", 0);
-                        stack  = pl.value("stack", 0);
+        for (const auto &pl : state_["players"]) {
+                if (pl.is_object() && jval<int>(pl, "seat", -1) == seat_) {
+                        street = jval<int>(pl, "street_bet", 0);
+                        stack  = jval<int>(pl, "stack", 0);
                         break;
                 }
         }
@@ -407,6 +456,7 @@ Bot::choose_and_send()
 int
 main(int argc, char **argv)
 {
+        setvbuf(stdout, nullptr, _IOLBF, 0); // live logs even when redirected
         int port = 9000;
         std::string host = "127.0.0.1", token, name;
 

@@ -13,13 +13,15 @@ LWS_LIBS = -lwebsockets -lcap -lsystemd
 
 include deps.mk
 
-TEST_POKER_BIN  = test/build/test_poker
-TEST_PROTO_BIN  = test/build/test_proto
-TEST_SERVER_BIN = test/build/test_server
+TEST_POKER_BIN      = test/build/test_poker
+TEST_PROTO_BIN      = test/build/test_proto
+TEST_SERVER_BIN     = test/build/test_server
+TEST_TOURNAMENT_BIN = test/build/test_tournament
+TEST_POKERSTARS_BIN = test/build/test_pokerstars_export
 
-.PHONY: all server bot test clean distclean
+.PHONY: all server bot client test clean distclean
 
-all: server
+all: server bot client
 
 server:
 	$(MAKE) -C server
@@ -27,25 +29,57 @@ server:
 bot:
 	$(MAKE) -C bot/example
 
-$(TEST_POKER_BIN): test/test_poker.cpp server/src/poker.cpp $(PHEVAL_LIB)
-	@mkdir -p $(dir $@)
-	$(CXX) $(FLAGS) test/test_poker.cpp server/src/poker.cpp $(PHEVAL_LIB) -o $@
+client:
+	$(MAKE) -C client
 
-$(TEST_PROTO_BIN): test/test_proto.cpp server/src/proto.cpp server/src/poker.cpp $(PHEVAL_LIB)
-	@mkdir -p $(dir $@)
-	$(CXX) $(FLAGS) test/test_proto.cpp server/src/proto.cpp server/src/poker.cpp $(PHEVAL_LIB) -o $@
+$(TEST_POKER_BIN): test/build/test_poker.o test/build/poker.o $(PHEVAL_LIB)
+	$(CXX) $(FLAGS) $^ -o $@
 
-$(TEST_SERVER_BIN): test/test_server.cpp server/src/server.cpp server/src/proto.cpp server/src/poker.cpp $(PHEVAL_LIB)
-	@mkdir -p $(dir $@)
-	$(CXX) $(FLAGS) test/test_server.cpp server/src/server.cpp server/src/proto.cpp server/src/poker.cpp $(PHEVAL_LIB) $(LWS_LIBS) -o $@
+$(TEST_PROTO_BIN): test/build/test_proto.o test/build/proto.o test/build/poker.o $(PHEVAL_LIB)
+	$(CXX) $(FLAGS) $^ -o $@
 
-test: $(TEST_POKER_BIN) $(TEST_PROTO_BIN) $(TEST_SERVER_BIN)
+$(TEST_SERVER_BIN): test/build/test_server.o test/build/server.o test/build/proto.o \
+                    test/build/poker.o test/build/tournament.o test/build/pokerstars_export.o $(PHEVAL_LIB)
+	$(CXX) $(FLAGS) $^ $(LWS_LIBS) -o $@
+
+$(TEST_TOURNAMENT_BIN): test/build/test_tournament.o test/build/server.o test/build/proto.o \
+                        test/build/poker.o test/build/tournament.o test/build/pokerstars_export.o $(PHEVAL_LIB)
+	$(CXX) $(FLAGS) $^ $(LWS_LIBS) -o $@
+
+$(TEST_POKERSTARS_BIN): test/build/test_pokerstars_export.o test/build/pokerstars_export.o test/build/proto.o test/build/poker.o $(PHEVAL_LIB)
+	$(CXX) $(FLAGS) $^ -o $@
+
+test/build/test_server.o: test/test_server.cpp bot/example/bot.cpp \
+                          server/src/server.h server/src/proto.h \
+                          server/src/poker.h server/src/tournament.h \
+                          server/src/pokerstars_export.h
+	@mkdir -p $(dir $@)
+	$(CXX) $(FLAGS) -c $< -o $@
+
+test/build/test_tournament.o: test/test_tournament.cpp bot/example/bot.cpp \
+                              server/src/server.h server/src/proto.h \
+                              server/src/poker.h server/src/tournament.h \
+                              server/src/pokerstars_export.h
+	@mkdir -p $(dir $@)
+	$(CXX) $(FLAGS) -c $< -o $@
+
+test/build/%.o: test/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(FLAGS) -c $< -o $@
+
+test/build/%.o: server/src/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(FLAGS) -c $< -o $@
+
+test: $(TEST_POKER_BIN) $(TEST_PROTO_BIN) $(TEST_SERVER_BIN) $(TEST_TOURNAMENT_BIN) $(TEST_POKERSTARS_BIN)
 	./$(TEST_POKER_BIN)
 	./$(TEST_PROTO_BIN)
 	./$(TEST_SERVER_BIN)
+	./$(TEST_TOURNAMENT_BIN)
+	./$(TEST_POKERSTARS_BIN)
 
 clean:
-	rm -rf server/build bot/example/build test/build
+	rm -rf server/build bot/example/build client/build test/build
 
 distclean: clean
 	rm -rf $(PHEVAL_PATH) $(RAYLIB_BUILD)

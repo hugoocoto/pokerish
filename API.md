@@ -10,7 +10,8 @@ Protocol for connecting remote clients to the poker server.
   `queued`; when the current round ends the bot is replaced and the
   server sends `welcome`, after which the connection is bound to the
   seat. Clients leaving mid-hand are folded; a bot takes the seat over
-  at the end of the round.
+  at the end of the round. (Tournament mode changes this: no bots, see
+  `hello` and section 4.)
 
 ## Envelope
 
@@ -47,6 +48,12 @@ round ends the server sends `welcome` and the seat is yours (with a
 full entry stack, not the bot's chips). Until then the connection is
 not bound to a seat: `action` and `query` are rejected with
 `unauthorized`.
+
+In tournament mode (`--tournament`) there are no bots: `hello` in the
+`lobby`/`countdown` states seats the client immediately (the server
+answers `welcome`, no `queued`), and once the tournament is `running`
+or `finished` every `hello` is rejected with `table_full` (no late
+registration, no re-entry).
 
 When the server is started with `--token SECRET` (or a token is set in
 tests), `hello` must carry the same token:
@@ -125,6 +132,9 @@ message carries the full updated public state in its `state` field, so
 clients stay in sync without extra round trips. In addition, every
 client can `query` any public information at any time.
 
+Tournament mode broadcasts four extra event types: `tournament_start`,
+`level`, `player_out` and `tournament_over` (section 2bis).
+
 ## welcome
 
 Sent when the client's reserved seat is actually taken over, at the end
@@ -167,6 +177,8 @@ something changes; also the payload of `reply` to `query` `state`.
       "round_done": false,
       "hand_over": false,
       "common": [ null, null, null, null, null ],
+      "mode": "cash",
+      "blinds": { "small": 5, "big": 10, "ante": 0, "small_seat": 3, "big_seat": 4 },
       "players": [
         {
           "seat": 0,
@@ -177,6 +189,7 @@ something changes; also the payload of `reply` to `query` `state`.
           "folded": false,
           "has_acted": false,
           "all_in": false,
+          "busted": false,
           "last_action": { "type": "none", "amount": 0 },
           "is_turn": false
         }
@@ -207,7 +220,22 @@ Field mapping to the engine:
 | `players[].all_in`       | `Player::is_all_in`                 |
 | `players[].last_action`  | `Player::last_action` (kept for the whole betting round); `type` one of `none` `fold` `check` `call` `call_all` `bet` |
 | `players[].is_turn`      | `Player::is_my_turn`                |
+| `players[].busted`       | `Player::busted` (tournament: eliminated or empty seat; cash: always false) |
 | `timeout_seconds`        | `ActionTimeOut` (20)                |
+| `start_stack`            | starting stack for new/rebought seats (default 1000) |
+| `max_players`            | table seat capacity (default 6) |
+| `mode`                   | `"cash"` (infinite mode) or `"tournament"` |
+| `blinds`                 | current blinds `{ small, big, ante, small_seat, big_seat }`; the seats skip empty seats and follow the heads-up rule (button on the small blind) |
+
+In tournament mode the state additionally carries:
+
+| field                        | meaning                                            |
+|------------------------------|----------------------------------------------------|
+| `level`                      | current blind level (1-based; 0 before the start)  |
+| `level_seconds_remaining`    | seconds left until the blinds go up                |
+| `countdown_seconds_remaining`| seconds left on the pre-start countdown            |
+| `status`                     | `lobby` (waiting for players) / `countdown` / `running` / `finished` |
+| `players_alive`              | players still in the tournament                    |
 
 Hole cards are private: `my_cards` is never part of a broadcast and is
 only returned to the owner by `query` `my_cards`.
@@ -285,6 +313,62 @@ Broadcast once per finished hand.
 - The next hand starts after a short pause; a new `state` broadcast
   announces it.
 
+## 2bis. Tournament broadcasts
+
+Only in tournament mode (`--tournament`). All four messages carry the
+full `state` like every other broadcast.
+
+## tournament_start
+
+Broadcast once when the countdown ends and the first hand is about to
+be dealt.
+
+    {
+      "type": "tournament_start",
+      "level": 1,
+      "blinds": { "small": 5, "big": 10, "ante": 0 },
+      "state": { ... }
+    }
+
+## level
+
+Broadcast when the blinds go up. Level changes only ever take effect
+between hands, never mid-hand.
+
+    {
+      "type": "level",
+      "level": 2,
+      "blinds": { "small": 10, "big": 20, "ante": 0 },
+      "state": { ... }
+    }
+
+## player_out
+
+Broadcast when a player is eliminated: `"busted"` when their stack hit
+0 at the end of a hand, `"disconnected"` when the connection dropped.
+In either case the seat stays empty for the rest of the tournament (no
+bots, no re-entry). A disconnected player is folded immediately (their
+chips stay in the pot for the current hand) and the `player_out` event
+is broadcast at the next round end — not at the moment the connection
+drops.
+
+    { "type": "player_out", "seat": 3, "reason": "busted", "state": { ... } }
+
+## tournament_over
+
+Broadcast once when one player is left. The server stops dealing, shows
+the winner and rejects further `hello`s (`table_full`).
+
+    {
+      "type": "tournament_over",
+      "winner": { "seat": 0, "name": "Alice" },
+      "award": 6000,
+      "state": { ... }
+    }
+
+- `award` is the winner's final stack (winner takes all).
+- `state.status` is `"finished"`.
+
 ## reply
 
 Answer to a `query`; echoes the request `id` and `what`.
@@ -348,9 +432,60 @@ Reply to `ping`.
   - bet/raise `amount` values above 100,000,000 are rejected with
     `bad_request`.
 
+# 5. Tournament mode
+
+Run the server with `--tournament` (optionally
+`--level-seconds N` for the level length, default 300;
+`--countdown-seconds N`, default 10; and
+`--max-players N` for the number of seats, 2–6, default 6).
+Cash mode (the default, no flag)
+behaves exactly as described above; the differences are:
+
+- **No bots, no auto-play.** The seats start empty (2–6, configurable
+  with `--max-players`). The game only starts when all seats are
+  connected: the server seats clients immediately in the lobby, then
+  runs a countdown once the table is full (`status: "countdown"`); a
+  player leaving during the countdown returns the tournament to the
+  lobby. No hands are dealt before the countdown ends.
+- **Blinds rise with time.** Levels are fixed-length (see the schedule
+  below); the blinds of the next level only apply from the next hand,
+  never mid-hand. `level` broadcasts announce each increase.
+- **No rebuys, no bots after a bust.** A player who busts (stack 0)
+  is eliminated at the end of the hand: `player_out` (reason `"busted"`)
+  is broadcast, the seat stays empty, and nobody joins mid-tournament.
+  A player who disconnects is treated similarly but more gracefully:
+  they are folded immediately (chips already committed to the pot stay
+  in play), and `player_out` (reason `"disconnected"`) is broadcast at
+  the next round end.
+- **Heads-up rule.** With two players left, the button posts the small
+  blind and acts first preflop; after the flop the big blind acts
+  first. The button always moves to the next live player.
+- **Winner takes all.** When one player is left, `tournament_over` is
+  broadcast with the winner's full stack; the server stays on the
+  winner screen and rejects new `hello`s. Restart the server to play
+  again.
+
+Blind schedule (starting stack 1000 = 100 BB, 6000 chips in play;
+levels past 12 keep doubling):
+
+| Level | SB | BB | Ante |
+|-------|----|----|------|
+| 1  | 5    | 10    | -   |
+| 2  | 10   | 20    | -   |
+| 3  | 15   | 30    | -   |
+| 4  | 25   | 50    | -   |
+| 5  | 40   | 80    | 5   |
+| 6  | 60   | 120   | 10  |
+| 7  | 100  | 200   | 15  |
+| 8  | 150  | 300   | 25  |
+| 9  | 250  | 500   | 40  |
+| 10 | 400  | 800   | 60  |
+| 11 | 600  | 1200  | 100 |
+| 12 | 1000 | 2000  | 150 |
+
 ---
 
-# 5. Worked example
+# 6. Worked example
 
 A small hand, server "S", clients 0 (Alice) and 1 (Bob). State
 payloads are abbreviated as `{ ... }`.
