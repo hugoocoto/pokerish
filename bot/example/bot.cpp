@@ -1,7 +1,8 @@
 // Single-file poker bot: the whole client (transport, protocol, strategy,
 // CLI) in one .cpp — libwebsockets + nlohmann/json, speaking the API.md
 // WebSocket/JSON protocol. It connects to the server, says hello, and plays
-// random-ish hands with a ~1 s "thinking" delay and 40% indecision per try.
+// random-ish hands instantly (no "thinking" delay; use the server's
+// --simulate flag to add one).
 //
 // The strategy lives in Bot::choose_and_send(): a smarter bot only needs to
 // change that one method.
@@ -81,7 +82,7 @@ random_name()
 // Bot: one WebSocket connection = one player.
 //
 // Everything the connection does happens in the lws event loop (callback),
-// while pump() drives reconnect + "thinking" from the main/test loop.
+// while pump() drives reconnect + auto-actions from the main/test loop.
 // ---------------------------------------------------------------------------
 
 static lws_context *bot_context(); // forward decl: friend needs it
@@ -89,20 +90,35 @@ static lws_context *bot_context(); // forward decl: friend needs it
 class Bot
 {
     public:
-        // `index` only tags the bot; `auto_play` bots decide on their own
-        // (with a "thinking" delay), manual bots wait for take_messages().
+        // `index` only tags the bot; `auto_play` bots decide on their own,
+        // manual bots wait for take_messages().
         // `send_hello` bots say hello right after connecting.
-        // `think_seconds` is the thinking delay before an auto_play bot acts;
-        // 0 makes bots decide instantly (tests) instead of the default 1 s.
+        // `think_seconds` is a minimum delay before an auto_play bot acts;
+        // 0 makes bots decide instantly (default, and what tests use).
+        // `is_human` marks a human client in hello: the server then applies
+        // its actions with no simulated "thinking" delay (--simulate).
         Bot(lws_context *ctx, const char *host, int port, int index,
             bool auto_play = true, bool send_hello = true,
             const char *token = nullptr, const char *name = nullptr,
-            double think_seconds = 1.0)
+            double think_seconds = 0.0, bool is_human = false)
         : ctx_(ctx), host_(host), port_(port), index_(index),
           name_(name && name[0] ? name : random_name()), token_(token ? token : ""),
-          auto_play_(auto_play), send_hello_(send_hello), think_seconds_(think_seconds)
+          auto_play_(auto_play), send_hello_(send_hello), think_seconds_(think_seconds),
+          is_human_(is_human)
         {
                 connect();
+        }
+
+        // Drop the connection and detach the wsi's userdata so the late close
+        // callback (it can fire well after this object is gone) skips it
+        // instead of clobbering freed memory that a newer Bot may own.
+        ~Bot()
+        {
+                if (wsi_) {
+                        lws_set_wsi_user(wsi_, nullptr);
+                        lws_set_timeout(wsi_, PENDING_TIMEOUT_KILLED_BY_PROXY_CLIENT_CLOSE,
+                                        LWS_TO_KILL_ASYNC);
+                }
         }
 
         static double now() { return monotonic_now(); }
@@ -113,7 +129,7 @@ class Bot
         const nlohmann::json &last_state() const { return state_; }
         std::vector<nlohmann::json> take_messages();
 
-        // Reconnect + "thinking" logic; call once per lws_service() loop.
+        // Reconnect + auto-action logic; call once per lws_service() loop.
         void pump(double t);
         void send_action(const std::string &action, int amount = 0);
         void send_json(const nlohmann::json &j);
@@ -139,6 +155,7 @@ class Bot
         bool auto_play_;
         bool send_hello_;
         double think_seconds_;
+        bool is_human_;
 
         lws *wsi_{ nullptr };
         bool established_{ false };
@@ -241,6 +258,9 @@ Bot::take_messages()
 int
 Bot::callback(lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len)
 {
+        // The wsi's userdata is nulled by ~Bot; the connection may outlive the
+        // Bot object (e.g. killed with LWS_TO_KILL_ASYNC), so skip it.
+        if (!user) return 0;
         Bot *b = (Bot *) user;
         switch (reason) {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
@@ -249,6 +269,7 @@ Bot::callback(lws *wsi, enum lws_callback_reasons reason, void *user, void *in, 
                 if (b->send_hello_) {
                         nlohmann::json hello = { { "type", "hello" }, { "name", b->name_ } };
                         if (!b->token_.empty()) hello["token"] = b->token_;
+                        if (b->is_human_) hello["is_human"] = true;
                         b->send_json(hello);
                 }
                 break;
@@ -377,10 +398,6 @@ Bot::pump(double t)
         if (!auto_play_ || !thinking_) return;
         if (t < decide_at_) return;
 
-        if (think_seconds_ > 0 && rand01() < 0.4) {
-                decide_at_ = t + think_seconds_; // indecision: keep "thinking"
-                return;
-        }
         thinking_ = false;
         choose_and_send();
 }

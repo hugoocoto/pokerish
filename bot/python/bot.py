@@ -2,8 +2,9 @@
 """Single-file poker bot example, in Python.
 
 Same behavior as the C++ bot in bot/example: connects to the server, says
-hello, and plays random-ish hands with a ~1 s "thinking" delay and 40%
-indecision per try, following the API.md WebSocket/JSON protocol.
+hello, and plays random-ish hands instantly (no "thinking" delay; use the
+server's --simulate flag to add one), following the API.md WebSocket/JSON
+protocol.
 
 Use it as a template: the strategy lives in Bot.choose_action(), so a
 smarter bot only needs to change that one method.
@@ -97,7 +98,7 @@ class Bot:
             print(f"{self.name}: joined as seat {self.seat}")
         elif msg_type == "your_turn":
             self.thinking = True
-            self.decide_at = asyncio.get_running_loop().time() + 1.0
+            self.decide_at = asyncio.get_running_loop().time()  # act instantly
         elif msg_type == "state":
             self.state = msg
         elif msg_type in ("action", "stage", "hand_over", "tournament_start", "level", "player_out", "tournament_over"):
@@ -136,9 +137,6 @@ class Bot:
 
     async def maybe_decide(self):
         if not self.thinking:
-            return
-        if random.random() < 0.4:
-            self.decide_at = asyncio.get_running_loop().time() + 1.0  # indecision
             return
         self.thinking = False
         await self.choose_and_send()

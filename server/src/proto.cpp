@@ -72,6 +72,10 @@ parse_message(const std::string &text, ClientMessage &out)
                         if (!j["token"].is_string()) return Err::BAD_REQUEST;
                         out.token = j["token"];
                 }
+                if (j.contains("is_human")) {
+                        if (!j["is_human"].is_boolean()) return Err::BAD_REQUEST;
+                        out.is_human = j["is_human"];
+                }
                 out.type = MsgType::HELLO;
                 out.name = j["name"];
                 return Err::NONE;
@@ -141,8 +145,9 @@ validate_action(const Game_State &state, const Player &p, int seat,
         } else if (a == "check_or_fold") {
                 out.type = (to_call <= 0) ? Player::Response::CHECK : Player::Response::FOLD;
         } else if (a == "bet") {
-                int target = (state.current_bet == 0) ? msg.amount
-                                                      : state.current_bet + msg.amount;
+                // amount is the raise increment above current_bet; with no
+                // current bet the increment is simply the full bet
+                int target = state.current_bet + msg.amount;
                 int max_target = p.stack + p._street_bet;
                 if (target < max_target && target < state.current_bet + state.min_raise) {
                         return Err::BET_TOO_SMALL;

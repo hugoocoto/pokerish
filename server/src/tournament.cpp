@@ -1,5 +1,7 @@
 #include "tournament.h"
 
+#include <climits>
+
 namespace tournament {
 
 // 6-max sit-and-go structure: 100 BB starting stack (1000 chips), slow-ish
@@ -27,6 +29,7 @@ level_blinds(int level)
         if (level <= kScheduleSize) return kSchedule[level - 1];
         BlindLevel l = kSchedule[kScheduleSize - 1];
         for (int i = kScheduleSize; i < level; i++) {
+                if (l.big > INT_MAX / 2) break; // saturate: never overflow
                 l.small *= 2;
                 l.big *= 2;
                 l.ante *= 2;

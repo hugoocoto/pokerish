@@ -22,6 +22,7 @@ struct ClientMessage {
         MsgType type{ MsgType::NONE };
         std::string name;   // hello
         std::string token;  // hello: optional auth token
+        bool is_human{ false }; // hello: human client, no simulated "thinking" delay
         std::string action; // action: fold/check/call/call_all/check_or_fold/bet
         int amount{ 0 };    // bet: raise increment on top of current_bet
         std::string query;  // query: state/my_cards/history

@@ -17,6 +17,12 @@ monotonic_now()
         return duration<double>(steady_clock::now().time_since_epoch()).count();
 }
 
+double
+Server::now()
+{
+        return monotonic_now();
+}
+
 int
 server_callback(lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len)
 {
@@ -37,11 +43,16 @@ server_callback(lws *wsi, enum lws_callback_reasons reason, void *user, void *in
 
         case LWS_CALLBACK_RECEIVE: {
                 Server::Session *s = (Server::Session *) lws_wsi_user(wsi);
+                if (!s) return -1; // session freed (restart kick); drop the wsi
                 s->inbuf.append((const char *) in, len);
                 if (s->inbuf.size() > Server::kMaxIn) {
                         srv->send_to(wsi, proto::serialize_error(0, proto::Err::BAD_REQUEST));
                         s->inbuf.clear();
-                        break;
+                        // Drop the connection: a legitimate client never sends
+                        // a payload this large; keeping it alive enables a DoS
+                        // fragment-flood (send endless continuations without the
+                        // final fragment so the buffer cycles fill->clear forever).
+                        return -1;
                 }
                 if (lws_is_final_fragment(wsi) && lws_remaining_packet_payload(wsi) == 0) {
                         std::string msg = std::move(s->inbuf);
@@ -88,7 +99,7 @@ Server::Server(int port, const char *host, const char *token, bool verbose,
         : port_(port), host_(host), token_(token ? token : ""), verbose_(verbose),
           tournament_(tournament), countdown_seconds_(countdown_seconds),
           start_stack_(std::max(1, start_stack)),
-          max_players_(std::max(2, std::min(max_players, 6))),
+          max_players_(std::max(2, std::min(max_players, MaxPlayers))),
           export_dir_(export_dir ? export_dir : "")
 {
         static struct lws_protocols protocols[] = {
@@ -168,6 +179,7 @@ Server::run()
                 last_now_  = now;
                 this->step(now);
                 this->detect_events(now);
+                if (exit_requested_) break;
         }
 }
 
@@ -185,6 +197,24 @@ Server::stop()
 {
         running_.store(false);
         if (ctx_) lws_cancel_service(ctx_);
+}
+
+void
+Server::set_simulate(bool on, double max_seconds)
+{
+        simulate_    = on;
+        simulate_max_ = max_seconds >= 1.0 ? max_seconds : 1.0;
+        if (!on) {
+                pending_action_.active = false;
+                hold_seat_             = -2;
+        }
+}
+
+void
+Server::set_tournament_end(TournamentEndMode mode, double hold_seconds)
+{
+        tournament_end_mode_ = mode;
+        tournament_end_hold_ = hold_seconds;
 }
 
 std::vector<lws *> &
@@ -234,7 +264,29 @@ std::string
 Server::sanitize_name(const std::string &name)
 {
         std::string out = name;
-        if (out.size() > kMaxNameLen) out.resize(kMaxNameLen);
+        // Truncate at a valid UTF-8 boundary so we never slice a multibyte
+        // codepoint in two (which would cause nlohmann::json::dump() to throw).
+        if (out.size() > kMaxNameLen) {
+                size_t cut = kMaxNameLen;
+                // Walk backwards from kMaxNameLen to find the start of a
+                // complete codepoint.  A continuation byte has the form
+                // 10xxxxxx (0x80..0xBF); back up past any of them.
+                while (cut > 0 && (out[cut] & 0xC0) == 0x80) --cut;
+                // If cut landed on a multi-byte lead byte, exclude it too
+                // so we don't leave a bare lead byte with no continuation.
+                unsigned char lead = (unsigned char) out[cut];
+                int expected_extra = (lead >= 0xF0) ? 3
+                                   : (lead >= 0xE0) ? 2
+                                   : (lead >= 0xC0) ? 1 : 0;
+                // Count how many continuation bytes actually follow
+                size_t actual_extra = out.size() - cut - 1;
+                if (actual_extra < (size_t) expected_extra) {
+                        // Truncation would leave an incomplete codepoint: drop it.
+                        out.resize(cut);
+                } else {
+                        out.resize(kMaxNameLen);
+                }
+        }
         for (char &c : out) {
                 if ((unsigned char) c < 0x20) c = ' '; // strip control characters
         }
@@ -316,6 +368,7 @@ Server::handle_hello(Session *s, lws *wsi, const proto::ClientMessage &msg)
                         send_to(wsi, proto::serialize_error(msg.id, proto::Err::TABLE_FULL));
                         return;
                 }
+                s->is_human = msg.is_human;
                 int seat = -1;
                 for (int i = 0; i < max_players_; i++) {
                         if (seat_session_[i] == nullptr && table_.players[i].busted) {
@@ -353,6 +406,7 @@ Server::handle_hello(Session *s, lws *wsi, const proto::ClientMessage &msg)
         // process_round_end() when the hand is over
         std::string name = sanitize_name(msg.name);
 
+        s->is_human    = msg.is_human;
         s->pending_seat = seat;
         s->name         = name;
         logf("P%d %s waiting to join (end of round)\n", seat, name.c_str());
@@ -374,7 +428,30 @@ Server::handle_action(Session *s, lws *wsi, const proto::ClientMessage &msg)
                 send_to(wsi, proto::serialize_error(msg.id, e));
                 return;
         }
-        p.response = resp;
+        if (!simulate_ || s->is_human) {
+                // no --simulate, or a human client (hello "is_human"): the
+                // action takes effect immediately
+                p.response = resp;
+                return;
+        }
+        // --simulate: the player answered instantly, but the server waits a
+        // random 1.0..simulate_max_ seconds ("thinking", with the randomness
+        // standing in for indecision) before the action takes effect. The
+        // wait is capped just below the action deadline, so a player who
+        // already answered is never folded on timeout, no matter how the
+        // random delay plays out; only players who never answer fold.
+        double now      = monotonic_now();
+        double deadline = p.action_start + table_.action_timeout - 0.05;
+        double apply_at = now + 1.0 + poker_random() * (simulate_max_ - 1.0);
+        if (apply_at > deadline) apply_at = deadline;
+        if (apply_at <= now) {
+                p.response = resp;
+                return;
+        }
+        pending_action_.seat     = s->seat;
+        pending_action_.resp     = resp;
+        pending_action_.apply_at = apply_at;
+        pending_action_.active   = true;
 }
 
 void
@@ -417,6 +494,145 @@ Server::give_bot(int seat)
 }
 
 void
+Server::step(double now)
+{
+        if (simulate_) {
+                // apply a queued remote action once its "thinking" delay
+                // elapsed (never past the action deadline, see handle_action)
+                if (pending_action_.active && now >= pending_action_.apply_at) {
+                        Player &q = table_.players[pending_action_.seat];
+                        if (state_.turn == pending_action_.seat && q.is_my_turn &&
+                            q.response.type == Player::Response::NONE) {
+                                q.response = pending_action_.resp;
+                        }
+                        pending_action_.active = false;
+                }
+                // engine (filler) bots "think" too: hold the engine step for
+                // the same random delay, so the whole table moves at a
+                // simulated human pace
+                if (!state_.hand_over && !state_.round_done && state_.turn >= 0 &&
+                    (size_t) state_.turn < table_.players.size() &&
+                    table_.players[state_.turn].auto_play) {
+                        if (hold_seat_ != state_.turn) {
+                                hold_seat_  = state_.turn;
+                                hold_until_ = now + 1.0 +
+                                        poker_random() * (simulate_max_ - 1.0);
+                        }
+                        if (now < hold_until_) return; // still "thinking"
+                } else {
+                        hold_seat_ = -2;
+                }
+        }
+
+        // keep the countdown / level clocks fresh for state_json and the GUI
+        state_.level_remaining     = std::max(0.0, state_.level_started_at +
+                                                    state_.level_seconds - now);
+        state_.countdown_remaining = std::max(0.0, state_.countdown_started_at +
+                                                    state_.countdown_seconds - now);
+
+        if (tournament_) {
+                switch (state_.tournament_status) {
+                case T_LOBBY:
+                        if (table_.alive_count() >= max_players_) {
+                                state_.tournament_status    = T_COUNTDOWN;
+                                state_.countdown_seconds    = countdown_seconds_;
+                                state_.countdown_started_at = now;
+                                logf("== tournament: table full, countdown (%gs) ==\n",
+                                     countdown_seconds_);
+                        }
+                        return;
+
+                case T_COUNTDOWN:
+                        if (table_.alive_count() < max_players_) {
+                                state_.tournament_status = T_LOBBY;
+                                logf("== tournament: player left, back to lobby ==\n");
+                                return;
+                        }
+                        if (now - state_.countdown_started_at >= state_.countdown_seconds) {
+                                state_.tournament_status = T_RUNNING;
+                                tournament::set_level(&state_, 1, now);
+                                logf("== tournament started, level 1 (%d/%d) ==\n",
+                                     state_.small_blind, state_.big_blind);
+                                nlohmann::json j = {
+                                        { "type", "tournament_start" },
+                                        { "level", state_.level },
+                                        { "blinds", { { "small", state_.small_blind },
+                                                      { "big", state_.big_blind },
+                                                      { "ante", state_.ante } } },
+                                        { "state", proto::state_json(table_, state_, game_id()) },
+                                };
+                                this->push_history(j);
+                                this->broadcast(j.dump());
+                        }
+                        return;
+
+                case T_RUNNING:
+                        if (state_.hand_over) {
+                                if (now - hand_over_at_ < hand_pause_) return;
+                                bool level_up = tournament::step(&state_, now);
+                                table_.end_hand(&state_);
+                                this->process_round_end();
+                                if (level_up) {
+                                        logf("== tournament: level %d, blinds %d/%d"
+                                             " (ante %d) ==\n",
+                                             state_.level, state_.small_blind,
+                                             state_.big_blind, state_.ante);
+                                }
+                                if (table_.alive_count() <= 1) {
+                                        state_.tournament_status = T_FINISHED;
+                                        tournament_end_at_       = now;
+                                        int winner = -1;
+                                        for (int i = 0; i < max_players_; i++) {
+                                                if (!table_.players[i].busted) winner = i;
+                                        }
+                                        if (winner >= 0) {
+                                                nlohmann::json j = {
+                                                        { "type", "tournament_over" },
+                                                        { "winner", { { "seat", winner },
+                                                                      { "name", table_.players[winner].name } } },
+                                                        { "award", table_.players[winner].stack },
+                                                        { "state", proto::state_json(table_, state_, game_id()) },
+                                                };
+                                                this->push_history(j);
+                                                this->broadcast(j.dump());
+                                                logf("== tournament over: %s wins the tournament ==\n",
+                                                     table_.players[winner].name.c_str());
+                                        } else {
+                                                logf("== tournament over: no players left ==\n");
+                                        }
+                                }
+                                logf("== next hand ==\n");
+                                return;
+                        }
+                        table_.step_game(&state_, now);
+                        return;
+
+                case T_FINISHED:
+                        if (tournament_end_mode_ == TournamentEndMode::STAY) return;
+                        if (tournament_end_mode_ == TournamentEndMode::EXIT) {
+                                exit_requested_ = true;
+                                return;
+                        }
+                        // RESTART: hold the winner screen, then reset to a lobby
+                        if (now - tournament_end_at_ >= tournament_end_hold_) {
+                                this->restart_tournament();
+                        }
+                        return;
+                }
+        }
+
+        if (state_.hand_over) {
+                if (now - hand_over_at_ >= hand_pause_) {
+                        this->process_round_end();
+                        table_.end_hand(&state_);
+                        logf("== next hand ==\n");
+                }
+                return;
+        }
+        table_.step_game(&state_, now);
+}
+
+void
 Server::process_round_end()
 {
         if (tournament_) {
@@ -427,7 +643,13 @@ Server::process_round_end()
                         if (!pending_bust_[i]) continue;
                         pending_bust_[i] = false;
                         Player &p = table_.players[i];
-                        if (p.busted) continue; // also busted by stack in end_hand
+                        if (p.busted) {
+                                // Already busted by stack in end_hand.  Make
+                                // sure prev_busted_ is synced so detect_events
+                                // does not fire a second player_out for this seat.
+                                if (i < (int) prev_busted_.size()) prev_busted_[i] = true;
+                                continue;
+                        }
                         p.busted = true;
                         p._fold  = true;
                         // Pre-update prev_busted_ so detect_events doesn't fire
@@ -522,6 +744,11 @@ Server::disconnect(Session *s, lws *wsi)
                 Player &p = table_.players[seat];
                 logf("P%d %s disconnected\n", seat, p.name.c_str());
                 seat_session_[seat] = nullptr;
+                // a queued simulated action must not resurrect the seat after
+                // the disconnect fold below
+                if (pending_action_.active && pending_action_.seat == seat) {
+                        pending_action_.active = false;
+                }
                 if (tournament_) {
                         if (state_.tournament_status == T_RUNNING) {
                                 if (!p.busted && !pending_bust_[seat]) {
@@ -576,104 +803,74 @@ Server::disconnect(Session *s, lws *wsi)
 }
 
 void
-Server::step(double now)
+Server::restart_tournament()
 {
-        // keep the countdown / level clocks fresh for state_json and the GUI
-        state_.level_remaining     = std::max(0.0, state_.level_started_at +
-                                                    state_.level_seconds - now);
-        state_.countdown_remaining = std::max(0.0, state_.countdown_started_at +
-                                                    state_.countdown_seconds - now);
-
-        if (tournament_) {
-                switch (state_.tournament_status) {
-                case T_LOBBY:
-                        if (table_.alive_count() >= max_players_) {
-                                state_.tournament_status    = T_COUNTDOWN;
-                                state_.countdown_seconds    = countdown_seconds_;
-                                state_.countdown_started_at = now;
-                                logf("== tournament: table full, countdown (%gs) ==\n",
-                                     countdown_seconds_);
-                        }
-                        return;
-
-                case T_COUNTDOWN:
-                        if (table_.alive_count() < max_players_) {
-                                state_.tournament_status = T_LOBBY;
-                                logf("== tournament: player left, back to lobby ==\n");
-                                return;
-                        }
-                        if (now - state_.countdown_started_at >= state_.countdown_seconds) {
-                                state_.tournament_status = T_RUNNING;
-                                tournament::set_level(&state_, 1, now);
-                                logf("== tournament started, level 1 (%d/%d) ==\n",
-                                     state_.small_blind, state_.big_blind);
-                                nlohmann::json j = {
-                                        { "type", "tournament_start" },
-                                        { "level", state_.level },
-                                        { "blinds", { { "small", state_.small_blind },
-                                                      { "big", state_.big_blind },
-                                                      { "ante", state_.ante } } },
-                                        { "state", proto::state_json(table_, state_, game_id()) },
-                                };
-                                this->push_history(j);
-                                this->broadcast(j.dump());
-                        }
-                        return;
-
-                case T_RUNNING:
-                        if (state_.hand_over) {
-                                if (now - hand_over_at_ < hand_pause_) return;
-                                bool level_up = tournament::step(&state_, now);
-                                table_.end_hand(&state_);
-                                this->process_round_end();
-                                if (level_up) {
-                                        logf("== tournament: level %d, blinds %d/%d"
-                                             " (ante %d) ==\n",
-                                             state_.level, state_.small_blind,
-                                             state_.big_blind, state_.ante);
-                                }
-                                if (table_.alive_count() <= 1) {
-                                        state_.tournament_status = T_FINISHED;
-                                        int winner = -1;
-                                        for (int i = 0; i < max_players_; i++) {
-                                                if (!table_.players[i].busted) winner = i;
-                                        }
-                                        if (winner >= 0) {
-                                                nlohmann::json j = {
-                                                        { "type", "tournament_over" },
-                                                        { "winner", { { "seat", winner },
-                                                                      { "name", table_.players[winner].name } } },
-                                                        { "award", table_.players[winner].stack },
-                                                        { "state", proto::state_json(table_, state_, game_id()) },
-                                                };
-                                                this->push_history(j);
-                                                this->broadcast(j.dump());
-                                                logf("== tournament over: %s wins the tournament ==\n",
-                                                     table_.players[winner].name.c_str());
-                                        } else {
-                                                logf("== tournament over: no players left ==\n");
-                                        }
-                                }
-                                logf("== next hand ==\n");
-                                return;
-                        }
-                        table_.step_game(&state_, now);
-                        return;
-
-                case T_FINISHED:
-                        return;
+        // kick every client: bots auto-reconnect (pump) and re-hello into the
+        // fresh lobby below. The session is freed here but the wsi only dies
+        // on the async kill, so detach its userdata: the late CLOSED callback
+        // must not touch the freed Session.
+        std::vector<lws *> dead = conns_;
+        for (lws *wsi : dead) {
+                Session *s = session_of(wsi);
+                if (s) {
+                        this->disconnect(s, wsi);
+                        lws_set_wsi_user(wsi, nullptr);
                 }
+                lws_set_timeout(wsi, PENDING_TIMEOUT_KILLED_BY_PROXY_CLIENT_CLOSE,
+                                LWS_TO_KILL_ASYNC);
         }
 
-        if (state_.hand_over) {
-                if (now - hand_over_at_ >= hand_pause_) {
-                        this->process_round_end();
-                        table_.end_hand(&state_);
-                        logf("== next hand ==\n");
-                }
-                return;
+        // players back to the constructor state: empty seats, no bots
+        for (int i = 0; i < max_players_; i++) {
+                Player &p = table_.players[i];
+                p.name    = "Seat " + std::to_string(i + 1);
+                p.stack   = start_stack_;
+                p.busted  = true;
+                p.auto_play = false;
+                p.hand.reset();
+                p._bet = 0;
+                p._street_bet = 0;
+                p._fold       = false;
+                p.has_acted   = false;
+                p.is_all_in   = false;
+                p.is_my_turn  = false;
+                p.action_start = 0;
+                p.clear_response();
         }
-        table_.step_game(&state_, now);
+        table_.pot          = 0;
+        table_.common.clear();
+        table_.winners.clear();
+        table_.win_amount.clear();
+        table_.award       = 0;
+        table_.result_text.clear();
+        table_.deck->cards.clear();
+
+        state_.tournament_status    = T_LOBBY;
+        state_.dealer               = 0;
+        state_.turn                 = 0;
+        state_.stage                = PREFLOP;
+        state_.current_bet          = 0;
+        state_.round_done           = false;
+        state_.hand_started         = false;
+        state_.hand_over            = false;
+        state_.countdown_started_at = 0;
+        state_.countdown_remaining  = 0;
+        tournament::set_level(&state_, 0, monotonic_now()); // default blinds, level 0
+        state_.min_raise            = state_.big_blind;
+
+        pending_bust_.assign(max_players_, false);
+        prev_last_action_.assign(max_players_, Player::LastAction());
+        prev_fold_.assign(max_players_, false);
+        prev_turn_.assign(max_players_, false);
+        for (int i = 0; i < max_players_; i++) prev_busted_[i] = true;
+        prev_stage_         = -1;
+        prev_level_         = 0;
+        prev_hand_started_  = false;
+        prev_hand_over_     = false;
+        last_state_str_.clear();
+        history_.clear();
+
+        logf("== tournament reset: back to lobby, %d seats ==\n", max_players_);
 }
 
 void

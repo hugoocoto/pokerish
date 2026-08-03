@@ -66,6 +66,16 @@ A missing or wrong token is rejected with `error` `bad_token`. Without
 `name` is truncated to 24 characters and control characters are
 stripped before it is stored or broadcast.
 
+Human clients (the raylib play client) may mark themselves so the
+server skips the simulated "thinking" delay (`--simulate`) for their
+actions:
+
+    { "type": "hello", "name": "Alice", "is_human": true }
+
+`is_human` is optional and defaults to `false`; anything that is not a
+boolean is rejected with `bad_request`. Bots should not send it — their
+actions keep the simulated pacing.
+
 ## action
 
 Take an action. `action` is one of:
@@ -87,11 +97,11 @@ Examples:
 
 Bet amounts:
 
-- `amount` is the **increment** on top of the current bet.
+- `amount` is the **increment** on top of the current bet; with no
+  current bet the increment is simply the full bet.
 - The server converts it to the player's total street target:
-  `target = current_bet + amount` (or just `amount` when
-  `current_bet == 0`), capped at `stack + street_bet`. A cap at the
-  stack is an all-in and is always legal.
+  `target = current_bet + amount`, capped at `stack + street_bet`. A
+  cap at the stack is an all-in and is always legal.
 - If the target is below `current_bet + min_raise` and is not an
   all-in, the action is invalid: `error` `bet_too_small`.
 - If it is not the client's turn: `error` `not_your_turn`.
@@ -223,7 +233,7 @@ Field mapping to the engine:
 | `players[].busted`       | `Player::busted` (tournament: eliminated or empty seat; cash: always false) |
 | `timeout_seconds`        | `ActionTimeOut` (20)                |
 | `start_stack`            | starting stack for new/rebought seats (default 1000) |
-| `max_players`            | table seat capacity (default 6) |
+| `max_players`            | table seat capacity (default 6, max 10) |
 | `mode`                   | `"cash"` (infinite mode) or `"tournament"` |
 | `blinds`                 | current blinds `{ small, big, ante, small_seat, big_seat }`; the seats skip empty seats and follow the heads-up rule (button on the small blind) |
 
@@ -437,11 +447,11 @@ Reply to `ping`.
 Run the server with `--tournament` (optionally
 `--level-seconds N` for the level length, default 300;
 `--countdown-seconds N`, default 10; and
-`--max-players N` for the number of seats, 2–6, default 6).
+`--max-players N` for the number of seats, 2–10, default 6).
 Cash mode (the default, no flag)
 behaves exactly as described above; the differences are:
 
-- **No bots, no auto-play.** The seats start empty (2–6, configurable
+- **No bots, no auto-play.** The seats start empty (2–10, configurable
   with `--max-players`). The game only starts when all seats are
   connected: the server seats clients immediately in the lobby, then
   runs a countdown once the table is full (`status: "countdown"`); a

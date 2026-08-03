@@ -40,6 +40,7 @@ test_exporter_cash_format()
         s.small_blind = 5;
         s.big_blind   = 10;
         s.dealer      = 0;
+        s.max_players = 6;
 
         PokerStarsExporter exp;
         exp.start_hand(101, s, t, "2026/08/03 00:00:00 ET");

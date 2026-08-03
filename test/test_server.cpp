@@ -1,15 +1,13 @@
 #include "../bot/example/bot.cpp"
 #include "../server/src/server.h"
 
-#include <arpa/inet.h>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
-#include <netinet/in.h>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
+
+#include "platform.h"
 
 static int g_failures = 0;
 
@@ -34,6 +32,7 @@ static int g_failures = 0;
 static int
 find_free_port()
 {
+        socket_lib_init();
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         struct sockaddr_in a{};
         a.sin_family      = AF_INET;
@@ -43,7 +42,7 @@ find_free_port()
         socklen_t alen = sizeof(a);
         getsockname(fd, (struct sockaddr *) &a, &alen);
         int port = ntohs(a.sin_port);
-        close(fd);
+        sock_close(fd);
         return port;
 }
 
@@ -95,12 +94,12 @@ class ScopedServer
 
 static std::vector<Bot *>
 make_clients(int port, int n, bool auto_play, bool send_hello = true,
-             double think_seconds = 0.0)
+             double think_seconds = 0.0, bool is_human = false)
 {
         std::vector<Bot *> cs;
         for (int i = 0; i < n; i++) {
                 cs.push_back(new Bot(g_ctx, "127.0.0.1", port, i, auto_play, send_hello,
-                                     nullptr, nullptr, think_seconds));
+                                     nullptr, nullptr, think_seconds, is_human));
         }
         return cs;
 }
@@ -447,6 +446,160 @@ test_tick_timeout()
 }
 
 static void
+test_simulate_never_times_out()
+{
+        // --simulate: bots answer instantly, but the server holds every
+        // action for a random "thinking" delay (capped just below the action
+        // deadline). A bot that already answered must never be folded on
+        // timeout, no matter how the random delay plays out.
+        int port = find_free_port();
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
+                   /*tournament=*/false, 300, 10, 1000, /*max_players=*/2, "hands");
+        CHECK(srv.hand_pause() == 0.0); // non-simulate: hands chain instantly
+        srv.table().action_timeout = 0.2;
+        srv.hand_pause()           = 0.01;
+        srv.set_simulate(true, 1.0); // think = exactly 1.0 s, capped at 0.15 s
+
+        std::atomic<bool> ticker_run{ true };
+        std::thread ticker([&] {
+                while (ticker_run.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                        lws_cancel_service(g_ctx);
+                }
+        });
+
+        // heads-up: the first (bot-only) round takes ~8 x 1 s holds, then the
+        // instant auto bots take over and every action is capped at 0.15 s
+        std::vector<Bot *> cs = make_clients(port, 2, true);
+
+        double end = Bot::now() + 15.0;
+        while (Bot::now() < end && !all_seated(cs)) {
+                srv.tick(Bot::now());
+                lws_service(g_ctx, 10);
+                for (Bot *b : cs) b->pump(Bot::now());
+        }
+        CHECK(all_seated(cs));
+
+        int actions = 0, timeouts = 0, hand_overs = 0;
+        double min_delay = 1e9, turn_at = 0;
+        end = Bot::now() + 10.0;
+        while (Bot::now() < end && timeouts == 0) {
+                srv.tick(Bot::now());
+                lws_service(g_ctx, 10);
+                for (Bot *b : cs) {
+                        b->pump(Bot::now());
+                        for (auto &m : b->take_messages()) {
+                                std::string t = m.value("type", "");
+                                if (t == "your_turn") {
+                                        turn_at = Bot::now();
+                                } else if (t == "action") {
+                                        actions++;
+                                        if (m["reason"].is_string() &&
+                                            m["reason"] == "timeout") {
+                                                timeouts++;
+                                        }
+                                        if (turn_at > 0 &&
+                                            m.value("seat", -1) == b->seat()) {
+                                                min_delay = std::min(min_delay,
+                                                        Bot::now() - turn_at);
+                                        }
+                                } else if (t == "hand_over") {
+                                        hand_overs++;
+                                }
+                        }
+                }
+        }
+
+        // the game progressed at a simulated human pace, nobody was folded
+        // on timeout, and the hold really delayed the actions
+        CHECK(actions > 0);
+        CHECK(timeouts == 0);
+        CHECK(hand_overs > 0);
+        CHECK(min_delay >= 0.10);
+
+        ticker_run.store(false);
+        ticker.join();
+        srv.stop();
+        for (Bot *b : cs) delete b;
+}
+
+static void
+test_simulate_human_instant()
+{
+        // --simulate with a human client (hello "is_human": true): the
+        // human's actions apply instantly, while a plain remote bot's are
+        // still held for the simulated "thinking" delay (capped at 0.15 s).
+        int port = find_free_port();
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
+                   /*tournament=*/false, 300, 10, 1000, /*max_players=*/2, "hands");
+        srv.table().action_timeout = 0.2;
+        srv.hand_pause()           = 0.01;
+        srv.set_simulate(true, 1.0); // think = exactly 1.0 s, capped at 0.15 s
+
+        std::atomic<bool> ticker_run{ true };
+        std::thread ticker([&] {
+                while (ticker_run.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                        lws_cancel_service(g_ctx);
+                }
+        });
+
+        // heads-up: one human client (is_human) + one plain bot
+        std::vector<Bot *> cs = make_clients(port, 1, true);
+        Bot *human = new Bot(g_ctx, "127.0.0.1", port, 1, true, true, nullptr, nullptr,
+                             0.0, /*is_human=*/true);
+        cs.push_back(human);
+
+        double end = Bot::now() + 15.0;
+        while (Bot::now() < end && !all_seated(cs)) {
+                srv.tick(Bot::now());
+                lws_service(g_ctx, 10);
+                for (Bot *b : cs) b->pump(Bot::now());
+        }
+        CHECK(all_seated(cs));
+
+        double human_delay = 1e9, bot_delay = 1e9;
+        double human_turn_at = 0, bot_turn_at = 0;
+        end = Bot::now() + 10.0;
+        while (Bot::now() < end && (human_delay > 0.05 || bot_delay > 0.10)) {
+                srv.tick(Bot::now());
+                lws_service(g_ctx, 10);
+                for (Bot *b : cs) {
+                        b->pump(Bot::now());
+                        for (auto &m : b->take_messages()) {
+                                std::string t = m.value("type", "");
+                                if (t == "your_turn") {
+                                        if (b == human) {
+                                                human_turn_at = Bot::now();
+                                        } else {
+                                                bot_turn_at = Bot::now();
+                                        }
+                                } else if (t == "action") {
+                                        double at = (b == human) ? human_turn_at : bot_turn_at;
+                                        if (at > 0) {
+                                                double d = Bot::now() - at;
+                                                if (b == human) {
+                                                        human_delay = std::min(human_delay, d);
+                                                } else {
+                                                        bot_delay = std::min(bot_delay, d);
+                                                }
+                                        }
+                                }
+                        }
+                }
+        }
+
+        // the human's actions were not held; the bot's were (capped at 0.15 s)
+        CHECK(human_delay <= 0.05);
+        CHECK(bot_delay >= 0.10);
+
+        ticker_run.store(false);
+        ticker.join();
+        srv.stop();
+        for (Bot *b : cs) delete b;
+}
+
+static void
 test_hand_flow()
 {
         int port = find_free_port();
@@ -766,6 +919,128 @@ test_custom_config()
         }
 }
 
+static void
+test_ten_players()
+{
+        int port = find_free_port();
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false, /*tournament=*/false,
+                   /*level_seconds=*/300, /*countdown_seconds=*/10, /*start_stack=*/1000,
+                   /*max_players=*/10);
+        srv.table().action_timeout = 0.2;
+        srv.hand_pause()           = 0.01;
+        std::thread th([&] { srv.run(); });
+
+        CHECK_EQ(srv.state().max_players, 10);
+        CHECK_EQ(srv.table().players.size(), 10);
+
+        // the hard cap applies even if the caller asks for more
+        Server cap(port + 1, "127.0.0.1", nullptr, false, false, 300, 10, 1000,
+                   /*max_players=*/12);
+        CHECK_EQ(cap.state().max_players, MaxPlayers);
+
+        std::vector<Bot *> cs = make_clients(port, 10, false);
+        CHECK(wait_until([&] { return all_seated(cs); }, 10.0));
+        for (Bot *b : cs) {
+                CHECK(b->seat() >= 0 && b->seat() < 10);
+                CHECK_EQ(b->last_state()["players"].size(), 10);
+        }
+
+        // one full hand with all ten seats dealt in and resolving; drive in
+        // small windows so we exit as soon as the hand is over
+        int hand_over = 0;
+        int seen      = 0;
+        double end    = Bot::now() + 40.0;
+        while (Bot::now() < end && hand_over == 0) {
+                seen = drive_hand(cs, 0.5, &hand_over);
+        }
+        CHECK(hand_over >= 1);
+        CHECK(seen >= 1);
+
+        for (Bot *b : cs) delete b;
+        srv.stop();
+        th.join();
+}
+
+// Sending a name that contains a multibyte UTF-8 sequence that would be
+// sliced by naive resize() must not crash the server via a json::dump()
+// exception.  The name is sanitised to a valid UTF-8 string on the server side.
+static void
+test_utf8_name_no_crash()
+{
+        int port = find_free_port();
+        ScopedServer ss(port);
+
+        // 🃁  is the 4-byte sequence F0 9F 83 81.  Embed it at the edge of the
+        // 24-byte limit so a naive resize(24) would split it.
+        // 20 ASCII chars + 4-byte emoji = 24 bytes exactly, but kMaxNameLen==24
+        // means only 24 bytes survive, and the emoji starts at byte 20 so the
+        // full codepoint is kept.  Add a second emoji so a 24-byte cut lands
+        // inside the second one and the UTF-8-aware truncator drops the partial.
+        std::string emoji_name = "12345678901234567890" // 20 bytes
+                                 "\xF0\x9F\x83\x81"     // 4-byte emoji (24 total)
+                                 "\xF0\x9F\x83\x82";    // another emoji (28 total, cut here)
+
+        // Use send_hello=true so the Bot sends hello automatically inside
+        // on_connect(), just like every other test — this avoids the race
+        // where manual send_json fires before the WS handshake completes.
+        Bot *b = new Bot(g_ctx, "127.0.0.1", port, 0, false, /*send_hello=*/true,
+                         /*token=*/nullptr, emoji_name.c_str());
+
+        // Wait for welcome or queued; crucially the server must still be alive.
+        bool got_response = wait_until([&] {
+                for (auto &m : b->take_messages()) {
+                        std::string t = m.value("type", "");
+                        if (t == "welcome" || t == "queued" || t == "error") return true;
+                }
+                return false;
+        }, 5.0);
+        CHECK(got_response); // server replied, did not crash
+
+        // Verify the server is still processing new clients after the UTF-8 name.
+        Bot *b2 = new Bot(g_ctx, "127.0.0.1", port, 1, false, /*send_hello=*/true,
+                          /*token=*/nullptr, "NormalBot");
+        bool b2_got = wait_until([&] {
+                for (auto &m : b2->take_messages()) {
+                        if (m.value("type", "") == "welcome" ||
+                            m.value("type", "") == "queued") return true;
+                }
+                return false;
+        }, 5.0);
+        CHECK(b2_got); // server still alive and accepting connections
+
+        delete b;
+        delete b2;
+}
+
+// Sending a payload larger than kMaxIn must drop the connection (return -1
+// in the callback), not keep it alive and cycle fill->clear indefinitely.
+static void
+test_dos_connection_dropped_on_overflow()
+{
+        int port = find_free_port();
+        ScopedServer ss(port);
+
+        // Connect a bot but do NOT send hello — we will send a raw oversized payload.
+        Bot *b = new Bot(g_ctx, "127.0.0.1", port, 0, false, /*send_hello=*/false);
+        // Wait for the connection to establish (WS handshake needs lws service).
+        pump(0.3);
+        CHECK(b->connected());
+
+        // Send a payload larger than kMaxIn (65536 bytes) and pump so lws
+        // delivers the write to the server.
+        std::string giant(70000, 'x');
+        b->send_raw(giant);
+        pump(0.1); // let lws flush the outbound write
+
+        // The server should drop the connection: the bot disconnects.
+        bool disconnected = wait_until([&] {
+                return !b->connected();
+        }, 5.0);
+        CHECK(disconnected); // connection was dropped, not kept alive
+
+        delete b;
+}
+
 int
 main()
 {
@@ -775,6 +1050,8 @@ main()
         run_test("join_and_welcome", test_join_and_welcome);
         run_test("protocol_errors", test_protocol_errors);
         run_test("tick_timeout", test_tick_timeout);
+        run_test("simulate_never_times_out", test_simulate_never_times_out);
+        run_test("simulate_human_instant", test_simulate_human_instant);
         run_test("hand_flow", test_hand_flow);
         run_test("bot_e2e", test_bot_e2e);
         run_test("end_of_round_join", test_end_of_round_join);
@@ -783,6 +1060,9 @@ main()
         run_test("hello_name_sanitized", test_hello_name_sanitized);
         run_test("bust_kick", test_bust_kick);
         run_test("custom_config", test_custom_config);
+        run_test("ten_players", test_ten_players);
+        run_test("utf8_name_no_crash", test_utf8_name_no_crash);
+        run_test("dos_connection_dropped_on_overflow", test_dos_connection_dropped_on_overflow);
 
         lws_context_destroy(g_ctx);
 

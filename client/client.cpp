@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -27,8 +28,8 @@
 #include "raylib.h"
 
 struct {
-        int width{ 800 };
-        int height{ 600 };
+        int width{ 1280 };
+        int height{ 720 };
         const char *title{ "Poker [Client]" };
 } win;
 
@@ -76,6 +77,8 @@ struct ClientData {
         int pending_source{ 0 };
         bool prev_my_turn{ false };
         bool leave_requested{ false };
+        int turn_seat{ -1 };         // whose turn per the last state
+        double turn_seat_since{ 0 }; // client clock when that seat's turn started
         std::string tournament_winner; // set by tournament_over
         int tournament_award{ 0 };     // set by tournament_over
         std::string tournament_event_text; // temporary banner text for events
@@ -86,6 +89,28 @@ static void
 request_my_cards(ClientData &cd)
 {
         cd.bot->send_json({ { "type", "query" }, { "id", 1 }, { "what", "my_cards" } });
+}
+
+// Draw a card by its two-character name ("As", "Td", ...), falling back to
+// the card back on any unexpected value from the server. phevaluator::Card's
+// constructor throws std::out_of_range on strings it cannot parse ("??"),
+// so it is wrapped and the throw lands in the same fallback.
+static void
+draw_named_card(ClientData &cd, const std::string &name, int x, int y)
+{
+        if (name.size() == 2) {
+                try {
+                        auto it = themed_cards.find(int(phevaluator::Card(name)));
+                        if (it != themed_cards.end()) {
+                                it->second.draw(x, y);
+                                return;
+                        }
+                } catch (const std::out_of_range &) {
+                        // fall through to the card back
+                }
+        }
+        DrawTextureEx(cd.card_back, Vector2{ (float) x, (float) y }, 0.0f,
+                      ui_scale / 2.0f, WHITE);
 }
 
 static void
@@ -210,7 +235,11 @@ update_turn_state(ClientData &cd)
         int game_id       = jval<int>(st, "game_id", -1);
         bool hand_over    = jval<bool>(st, "hand_over", false);
 
-        if (game_id != cd.prev_game_id || (stage == "preflop" && cd.prev_stage != "preflop")) {
+        // New hand: re-request our hole cards. Only when seated — while
+        // queued (waiting for a seat) the server has no seat for us and
+        // answers my_cards queries with `unauthorized`.
+        if (cd.seat >= 0 &&
+            (game_id != cd.prev_game_id || (stage == "preflop" && cd.prev_stage != "preflop"))) {
                 cd.prev_game_id = game_id;
                 cd.my_cards[0].clear();
                 cd.my_cards[1].clear();
@@ -222,12 +251,23 @@ update_turn_state(ClientData &cd)
         }
         cd.prev_stage = stage;
 
-        // If we are seated in an active hand but missing hole cards, keep requesting them until received
+        // If we are seated in an active hand but missing hole cards, keep requesting them until received.
+        // Skip if we are busted (tournament out) — the server will return nulls indefinitely.
         if (cd.seat >= 0 && !hand_over && stage != "over" && cd.my_cards[0].empty()) {
-                static double last_req = 0;
-                if (Bot::now() - last_req > 0.5) {
-                        last_req = Bot::now();
-                        request_my_cards(cd);
+                bool i_am_busted = false;
+                for (const auto &pl : st["players"]) {
+                        if (jval<int>(pl, "seat", -1) == cd.seat &&
+                            jval<bool>(pl, "busted", false)) {
+                                i_am_busted = true;
+                                break;
+                        }
+                }
+                if (!i_am_busted) {
+                        static double last_req = 0;
+                        if (Bot::now() - last_req > 0.5) {
+                                last_req = Bot::now();
+                                request_my_cards(cd);
+                        }
                 }
         }
 
@@ -238,6 +278,24 @@ update_turn_state(ClientData &cd)
                         break;
                 }
         }
+
+        // track the current turn holder (for other players' countdown bars):
+        // states are broadcast when the turn changes, so the arrival time is
+        // close enough to the real turn start
+        int turn_seat = -1;
+        for (const auto &pl : st["players"]) {
+                if (jval<bool>(pl, "is_turn", false)) {
+                        turn_seat = jval<int>(pl, "seat", -1);
+                        break;
+                }
+        }
+        if (turn_seat >= 0 && turn_seat != cd.turn_seat) {
+                cd.turn_seat        = turn_seat;
+                cd.turn_seat_since  = Bot::now();
+        } else if (turn_seat < 0) {
+                cd.turn_seat = -1;
+        }
+
         if (my_turn) {
                 if (cd.my_turn_since == 0) cd.my_turn_since = Bot::now();
                 if (!cd.prev_my_turn) send_pending(cd);
@@ -254,16 +312,36 @@ update_turn_state(ClientData &cd)
 
 
 static void
-draw_player(ClientData &cd, const nlohmann::json &state, const nlohmann::json &pl,
-            int seat, int x, int y, int screen_h)
+draw_player_bet(const nlohmann::json &pl, int x, int y, int screen_h)
 {
-        const int cw        = default_card_size.width;
-        const int ch        = default_card_size.height;
-        const int margin    = 8;
+        const int cw = sc((int) default_card_size.width);
+        const int ch = sc((int) default_card_size.height);
+        if (jval<bool>(pl, "busted", false)) return;
+
+        char buf[64] = { 0 };
+        snprintf(buf, sizeof(buf) - 1, "Bet: %d", jval<int>(pl, "bet", 0));
+        int tx = x + cw - MeasureText(buf, sc(20)) / 2;
+        int by;
+        if (y > screen_h / 2) {
+                // bottom half: just above the name
+                by = y - sc(48);
+        } else {
+                // top half: just below the chips line
+                by = y + ch + sc(4) + sc(20) + sc(4);
+        }
+        DrawText(buf, tx, by, sc(20), ORANGE);
+}
+
+static void
+draw_player(ClientData &cd, const nlohmann::json &state, const nlohmann::json &pl,
+            int seat, int x, int y)
+{
+        const int cw        = sc((int) default_card_size.width);
+        const int ch        = sc((int) default_card_size.height);
+        const int margin    = sc(8);
         std::string name    = jval<std::string>(pl, "name", "");
         bool folded         = jval<bool>(pl, "folded", false);
         int stack           = jval<int>(pl, "stack", 0);
-        int bet             = jval<int>(pl, "bet", 0);
         bool is_me          = seat == cd.seat;
         bool busted         = jval<bool>(pl, "busted", false);
 
@@ -271,8 +349,8 @@ draw_player(ClientData &cd, const nlohmann::json &state, const nlohmann::json &p
                 // empty seat (lobby) or eliminated player: two card outlines + name (OUT)
                 std::string label = name.empty() ? "Empty" : (name + " (OUT)");
                 const int bw = 2 * cw + margin;
-                int tx = x + (bw - MeasureText(label.c_str(), 20)) / 2;
-                DrawText(label.c_str(), tx, y - 4 - 20, 20, GRAY);
+                int tx = x + (bw - MeasureText(label.c_str(), sc(20))) / 2;
+                DrawText(label.c_str(), tx, y - sc(4) - sc(20), sc(20), GRAY);
 
                 DrawRectangleLinesEx({ .x = (float) x, .y = (float) y, .width = (float) cw, .height = (float) ch }, 2, DARKGRAY);
                 DrawRectangleLinesEx({ .x = (float) (x + cw + margin), .y = (float) y, .width = (float) cw, .height = (float) ch }, 2, DARKGRAY);
@@ -297,10 +375,10 @@ draw_player(ClientData &cd, const nlohmann::json &state, const nlohmann::json &p
         }
 
         if (show_cards) {
-                themed_cards.at(int(phevaluator::Card(c1))).draw(x, y);
-                themed_cards.at(int(phevaluator::Card(c2))).draw(x + cw + margin, y);
+                draw_named_card(cd, c1, x, y);
+                draw_named_card(cd, c2, x + cw + margin, y);
                 if (is_winner) {
-                        DrawRectangleLinesEx({ .x = (float) x - 2, .y = (float) y - 2, .width = (float) (2 * cw + margin + 4), .height = (float) (ch + 4) }, 2, GOLD);
+                        DrawRectangleLinesEx({ .x = (float) x - sc(2), .y = (float) y - sc(2), .width = (float) (2 * cw + margin + sc(4)), .height = (float) (ch + sc(4)) }, 2, GOLD);
                 }
         } else {
                 if (is_winner) {
@@ -308,15 +386,17 @@ draw_player(ClientData &cd, const nlohmann::json &state, const nlohmann::json &p
                         DrawRectangleLinesEx({ .x = (float) (x + cw + margin), .y = (float) y, .width = (float) cw, .height = (float) ch }, 2, GOLD);
                 } else {
                         // active or folded players' cards are shown reversed (card back)
-                        DrawTexture(cd.card_back, x, y, WHITE);
-                        DrawTexture(cd.card_back, x + cw + margin, y, WHITE);
+                        DrawTextureEx(cd.card_back, Vector2{ (float) x, (float) y }, 0.0f,
+                                      ui_scale / 2.0f, WHITE);
+                        DrawTextureEx(cd.card_back, Vector2{ (float) (x + cw + margin), (float) y }, 0.0f,
+                                      ui_scale / 2.0f, WHITE);
                 }
         }
 
         std::string display_name = is_winner ? (name + " (WINNER)") : name;
-        int nw = MeasureText(display_name.c_str(), 20);
+        int nw = MeasureText(display_name.c_str(), sc(20));
         int tx = x + cw - nw / 2;
-        DrawText(display_name.c_str(), tx, y - 4 - 20, 20, is_winner ? GOLD : WHITE);
+        DrawText(display_name.c_str(), tx, y - sc(4) - sc(20), sc(20), is_winner ? GOLD : WHITE);
 
         int dealer = jval<int>(state, "dealer", -1);
         size_t nplayers = (state.contains("players") && state["players"].is_array())
@@ -336,29 +416,20 @@ draw_player(ClientData &cd, const nlohmann::json &state, const nlohmann::json &p
 
         // dealer coin (circled) and blind buttons share the seat's top-left
         // corner; SB/BB are plain red text without a circle
-        int cx = x - 13;
-        int cy = y - 13;
+        int cx = x - sc(13);
+        int cy = y - sc(13);
         if (seat == dealer) {
-                DrawCircleLines(cx, cy, 12, WHITE);
-                DrawText("D", cx - MeasureText("D", 20) / 2, cy - 10, 20, WHITE);
+                DrawCircleLines(cx, cy, sc(12), WHITE);
+                DrawText("D", cx - MeasureText("D", sc(20)) / 2, cy - sc(10), sc(20), WHITE);
         } else if (seat == sb || seat == bb) {
                 const char *label = seat == sb ? "SB" : "BB";
-                DrawText(label, cx - MeasureText(label, 13) / 2, cy - 13 / 2, 13, RED);
+                DrawText(label, cx - MeasureText(label, sc(13)) / 2, cy - sc(13) / 2, sc(13), RED);
         }
 
         char buf[64] = { 0 };
         snprintf(buf, sizeof(buf) - 1, "Chips: %d", stack);
-        tx = x + cw - MeasureText(buf, 20) / 2;
-        DrawText(buf, tx, y + ch + 4, 20, is_winner ? GOLD : GRAY);
-
-        int betmargin = 10;
-        snprintf(buf, sizeof(buf) - 1, "Bet: %d", bet);
-        tx = x + cw - MeasureText(buf, 20) / 2;
-        if (y > screen_h / 2) {
-                DrawText(buf, tx, y - (4 + 20) * 2 - betmargin, 20, ORANGE);
-        } else {
-                DrawText(buf, tx, y + ch + 4 * 3 + 20 * 3 + betmargin, 20, ORANGE);
-        }
+        tx = x + cw - MeasureText(buf, sc(20)) / 2;
+        DrawText(buf, tx, y + ch + sc(4), sc(20), is_winner ? GOLD : GRAY);
 
         // banners span both cards, including the margin between them
         int banner_w  = 2 * cw + margin;
@@ -367,10 +438,25 @@ draw_player(ClientData &cd, const nlohmann::json &state, const nlohmann::json &p
         if (folded) {
                 // soft dark tint so hole cards/card backs remain 100% visible underneath
                 DrawRectangle(x, y, banner_w, ch, Color{ 0, 0, 0, 110 });
-                tx = banner_cx - MeasureText("Fold", 20) / 2;
-                DrawRectangle(x, y + ch / 2 - 15, banner_w, 30, Color{ 0, 0, 0, 180 });
-                DrawText("Fold", tx, y + ch / 2 - 10, 20, WHITE);
-                DrawRectangleLines(x, y + ch / 2 - 15, banner_w, 30, WHITE);
+                tx = banner_cx - MeasureText("Fold", sc(20)) / 2;
+                DrawRectangle(x, y + ch / 2 - sc(15), banner_w, sc(30), Color{ 0, 0, 0, 180 });
+                DrawText("Fold", tx, y + ch / 2 - sc(10), sc(20), WHITE);
+                DrawRectangleLines(x, y + ch / 2 - sc(15), banner_w, sc(30), WHITE);
+        } else if (jval<bool>(pl, "is_turn", false) && !is_me &&
+                   cd.turn_seat == seat && cd.turn_seat_since > 0) {
+                // someone else is thinking: green bar over their cards that
+                // shrinks with the remaining action time
+                double timeout = jval<int>(state, "timeout_seconds", 20);
+                double remain  = timeout - (Bot::now() - cd.turn_seat_since);
+                remain         = std::max(0.0, std::min(remain, (double) timeout));
+                DrawRectangle(x, y + ch / 2 - sc(15), banner_w, sc(30), Color{ 0, 0, 0, 180 });
+                if (remain > 0) {
+                        DrawRectangle(x, y + ch / 2 - sc(15), (int) (banner_w * remain / timeout),
+                                      sc(30), GREEN);
+                }
+                DrawRectangleLines(x, y + ch / 2 - sc(15), banner_w, sc(30), WHITE);
+                tx = banner_cx - MeasureText("Action", sc(20)) / 2;
+                DrawText("Action", tx, y + ch / 2 - sc(10), sc(20), WHITE);
         } else if (pl.contains("last_action") && pl["last_action"].is_object()) {
                 const auto &la = pl["last_action"];
                 std::string type         = jval<std::string>(la, "type", "none");
@@ -395,10 +481,10 @@ draw_player(ClientData &cd, const nlohmann::json &state, const nlohmann::json &p
                                 text = "Bet " + std::to_string(amount);
                         }
                         bg.a = bg.a * 0.75;
-                        tx   = banner_cx - MeasureText(text.c_str(), 20) / 2;
-                        DrawRectangle(x, y + ch / 2 - 15, banner_w, 30, bg);
-                        DrawText(text.c_str(), tx, y + ch / 2 - 10, 20, WHITE);
-                        DrawRectangleLines(x, y + ch / 2 - 15, banner_w, 30, WHITE);
+                        tx   = banner_cx - MeasureText(text.c_str(), sc(20)) / 2;
+                        DrawRectangle(x, y + ch / 2 - sc(15), banner_w, sc(30), bg);
+                        DrawText(text.c_str(), tx, y + ch / 2 - sc(10), sc(20), WHITE);
+                        DrawRectangleLines(x, y + ch / 2 - sc(15), banner_w, sc(30), WHITE);
                 }
         }
 }
@@ -414,8 +500,9 @@ static void
 button(Rectangle r, const char *label, bool enabled, Color col, bool armed = false,
        int fsize = 20)
 {
-        bool hover = enabled && CheckCollisionPointRec(GetMousePosition(), r);
-        Color bg   = enabled ? col : Color{ 60, 60, 60, 255 };
+        fsize       = sc(fsize);
+        bool hover  = enabled && CheckCollisionPointRec(GetMousePosition(), r);
+        Color bg    = enabled ? col : Color{ 60, 60, 60, 255 };
         if (hover || armed) bg = ColorBrightness(bg, -0.35f);
         DrawRectangleRec(r, bg);
         DrawRectangleLinesEx(r, 2, !enabled ? DARKGRAY : WHITE);
@@ -432,17 +519,17 @@ button(Rectangle r, const char *label, bool enabled, Color col, bool armed = fal
 static void
 draw_buttons(ClientData &cd, const nlohmann::json &state, int w, int h)
 {
-        int y               = h - 50;
-        Rectangle rfold     = { (float) (w / 2 - 265), (float) y, 110, 44 };
-        Rectangle rcall     = { (float) (w / 2 - 147), (float) y, 110, 44 };
-        Rectangle rminus    = { (float) (w / 2 - 29), (float) y, 26, 44 };
-        Rectangle rraise    = { (float) (w / 2 + 5), (float) y, 130, 44 };
-        Rectangle rplus     = { (float) (w / 2 + 143), (float) y, 26, 44 };
-        Rectangle rpot      = { (float) (w / 2 + 177), (float) y, 64, 44 };
-        Rectangle rallin    = { (float) (w / 2 + 249), (float) y, 84, 44 };
-        Rectangle rleave    = { (float) w - 68, 8, 60, 22 };
+        int y               = h - sc(50);
+        Rectangle rfold     = { (float) (w / 2 - sc(265)), (float) y, (float) sc(110), (float) sc(44) };
+        Rectangle rcall     = { (float) (w / 2 - sc(147)), (float) y, (float) sc(110), (float) sc(44) };
+        Rectangle rminus    = { (float) (w / 2 - sc(29)), (float) y, (float) sc(26), (float) sc(44) };
+        Rectangle rraise    = { (float) (w / 2 + sc(5)), (float) y, (float) sc(130), (float) sc(44) };
+        Rectangle rplus     = { (float) (w / 2 + sc(143)), (float) y, (float) sc(26), (float) sc(44) };
+        Rectangle rpot      = { (float) (w / 2 + sc(177)), (float) y, (float) sc(64), (float) sc(44) };
+        Rectangle rallin    = { (float) (w / 2 + sc(249)), (float) y, (float) sc(84), (float) sc(44) };
+        Rectangle rleave    = { (float) w - sc(68), (float) sc(8), (float) sc(60), (float) sc(22) };
 
-        DrawRectangle(0, h - 60, w, 60, { 24, 24, 24, 255 });
+        DrawRectangle(0, h - sc(60), w, sc(60), { 24, 24, 24, 255 });
 
         bool my_turn = false, folded = false;
         int stack = 0, street_bet = 0, current_bet = 0, min_raise = 10, pot = 0;
@@ -468,8 +555,8 @@ draw_buttons(ClientData &cd, const nlohmann::json &state, int w, int h)
                 int timeout   = jval<int>(state, "timeout_seconds", 20);
                 double remain = timeout - (Bot::now() - cd.my_turn_since);
                 remain        = std::max(0.0, std::min(remain, (double) timeout));
-                int bh        = 6;
-                DrawRectangle(0, h - 58, (int) (w * remain / timeout), bh, GREEN);
+                int bh        = sc(6);
+                DrawRectangle(0, h - sc(58), (int) (w * remain / timeout), bh, GREEN);
         }
         // clickable whenever we have a seat and are still in the hand;
         // not-our-turn clicks just arm a preselection; in a tournament the
@@ -487,10 +574,14 @@ draw_buttons(ClientData &cd, const nlohmann::json &state, int w, int h)
         int hi = std::max(lo, stack + street_bet - current_bet);
         cd.raise_inc = std::max(lo, std::min(cd.raise_inc, hi));
 
-        // quick raise presets: pot-sized bet (raise to pot + to_call +
-        // current_bet) and all-in
-        int pot_amount    = std::max(lo, std::min(pot + to_call + current_bet, hi));
-        int all_in_amount = std::max(lo, std::min(stack + street_bet, hi));
+        // quick raise presets: pot-sized raise increment and all-in.
+        // The server protocol expects "amount" to be the increment above
+        // current_bet, NOT the total target. A pot-sized raise totals
+        // pot + 2*to_call (pot includes our own street bet), so the
+        // increment is pot + to_call - street_bet (== pot + to_call when
+        // we have nothing committed this street, e.g. UTG preflop).
+        int pot_amount    = std::max(lo, std::min(pot + to_call - street_bet, hi));
+        int all_in_amount = std::max(lo, std::min(stack + street_bet - current_bet, hi));
 
         if (enabled) {
                 // disarmed automatically if the armed action is no longer
@@ -647,8 +738,8 @@ draw_buttons(ClientData &cd, const nlohmann::json &state, int w, int h)
                 }
         }
         if (!status.empty()) {
-                DrawText(status.c_str(), (w - MeasureText(status.c_str(), 20)) / 2,
-                         h - 60 - 26, 20, WHITE);
+                DrawText(status.c_str(), (w - MeasureText(status.c_str(), sc(20))) / 2,
+                         h - sc(60) - sc(26), sc(20), WHITE);
         }
 }
 
@@ -661,71 +752,95 @@ draw_table(ClientData &cd, int w, int h)
                 return;
         }
 
-        const float cw = default_card_size.width;
-        const float ch = default_card_size.height;
+        const float cw = scf(default_card_size.width);
+        const float ch = scf(default_card_size.height);
 
         // the action bar shrinks the table area: layout against inner height
-        const int bar_h = 60;
+        const int bar_h = sc(60);
         const int ih    = h - bar_h;
 
-        // six seat slots, index = clockwise offset from our own seat; our
-        // seat is always bottom centre, the others wrap around from there
-        int px[6];
-        int py[6];
-        px[0] = w / 2 - cw;
-        py[0] = ih - ch - ch / 2; // 0: hero, bottom centre
-        px[1] = cw / 2;
-        py[1] = ih - ch - ch / 2; // 1: bottom left
-        px[2] = cw / 2;
-        py[2] = ch / 2;           // 2: top left
-        px[3] = w / 2 - cw;
-        py[3] = ch / 2;           // 3: top centre
-        px[4] = w - cw * 2 - cw / 2;
-        py[4] = ch / 2;           // 4: top right
-        px[5] = w - cw * 2 - cw / 2;
-        py[5] = ih - ch - ch / 2; // 5: bottom right
+        // seats around an ellipse, indexed by clockwise offset from our own
+        // seat; our seat is always bottom centre (slot 0) and the others
+        // wrap around from there. N comes from the server state. The ellipse
+        // point is the seat's centre: half the seat block is subtracted so
+        // (px, py) is the top-left corner draw_player wants. The ring is
+        // deliberately wider than tall (flatter) so seats get more
+        // horizontal and less vertical separation. The vertical radius uses
+        // the window height (not ih) so the top seat clears the board text row.
+        const int N        = state.value("max_players", 6);
+        const float pad    = scf(40.0f); // room for the name label above each seat
+        const float bw     = 2.0f * cw + scf(8.0f);
+        const float rx     = w / 2.0f - cw - pad * 0.25f;
+        const float ry     = h / 2.0f - ch - pad * 1.5f;
+        int px[10];
+        int py[10];
+        for (int s = 0; s < N; s++) {
+                float a = (90.0f + s * 360.0f / N) * DEG2RAD;
+                px[s]   = (int) (w / 2.0f + rx * cosf(a) - bw / 2.0f);
+                py[s]   = (int) (ih / 2.0f + ry * sinf(a) - ch / 2.0f);
+        }
 
+        // where each seat is actually drawn (slot-indexed when seated,
+        // absolute when unseated), reused by the bet pass below
+        int sx[10];
+        int sy[10];
         if (state.contains("players") && state["players"].is_array()) {
                 for (const auto &pl : state["players"]) {
                         int seat = jval<int>(pl, "seat", -1);
-                        if (seat < 0 || seat > 5) continue;
+                        if (seat < 0 || seat >= N) continue;
                         int slot;
                         if (cd.seat >= 0) {
-                                slot = (seat - cd.seat + 6) % 6;
+                                slot = (seat - cd.seat + N) % N;
                         } else {
-                                static const int abs_slot[6] = { 2, 3, 4, 5, 0, 1 };
-                                slot                          = abs_slot[seat];
+                                // unseated: mirror the server GUI's absolute
+                                // layout (seat 0 top, clockwise)
+                                float a = (-90.0f + seat * 360.0f / N) * DEG2RAD;
+                                sx[seat] = (int) (w / 2.0f + rx * cosf(a) - bw / 2.0f);
+                                sy[seat] = (int) (ih / 2.0f + ry * sinf(a) - ch / 2.0f);
+                                draw_player(cd, state, pl, seat, sx[seat], sy[seat]);
+                                continue;
                         }
-                        draw_player(cd, state, pl, seat, px[slot], py[slot], ih);
+                        sx[seat] = px[slot];
+                        sy[seat] = py[slot];
+                        draw_player(cd, state, pl, seat, px[slot], py[slot]);
                 }
         }
 
         // common card slots
-        int margin  = 8;
+        int margin  = sc(8);
         float my    = (ih - ch) / 2;
         float mx    = (w - cw * 5 - margin * 4) / 2;
 
         const nlohmann::json &common = state.value("common", nlohmann::json::array());
         for (int i = 0; i < 5; i++) {
-                DrawRectangleLinesEx({ .x = mx + (cw + margin) * i, .y = my, .width = cw, .height = ch }, 3, GRAY);
+                DrawRectangleLinesEx({ .x = mx + (cw + margin) * i, .y = my, .width = cw, .height = ch }, sc(3), GRAY);
                 if (common.is_array() && (int) common.size() > i && common[i].is_string()) {
-                        std::string name = common[i].get<std::string>();
-                        themed_cards.at(int(phevaluator::Card(name)))
-                                .draw(mx + (cw + margin) * i, my);
+                        draw_named_card(cd, common[i].get<std::string>(),
+                                        mx + (cw + margin) * i, my);
                 }
         }
 
         char buf[128] = { 0 };
         snprintf(buf, sizeof(buf) - 1, "Pot: %d", state.value("pot", 0));
-        int tx = (w - MeasureText(buf, 20)) / 2;
-        DrawText(buf, tx, my - 40, 20, ORANGE);
+        int tx = (w - MeasureText(buf, sc(20))) / 2;
+        DrawText(buf, tx, my - sc(40), sc(20), ORANGE);
 
         std::string stage = jval<std::string>(state, "stage", "");
         int current_bet   = jval<int>(state, "current_bet", 0);
         if (current_bet > 0 && stage != "over") {
                 snprintf(buf, sizeof(buf) - 1, "Current bet: %d", current_bet);
-                tx = (w - MeasureText(buf, 20)) / 2;
-                DrawText(buf, tx, my - 64, 20, GRAY);
+                tx = (w - MeasureText(buf, sc(20))) / 2;
+                DrawText(buf, tx, my - sc(64), sc(20), GRAY);
+        }
+
+        // bets are drawn after the board so the ones that land on its edge
+        // (center-column seats) stay visible instead of being covered
+        if (state.contains("players") && state["players"].is_array()) {
+                for (const auto &pl : state["players"]) {
+                        int seat = jval<int>(pl, "seat", -1);
+                        if (seat < 0 || seat >= N) continue;
+                        draw_player_bet(pl, sx[seat], sy[seat], ih);
+                }
         }
 
         // tournament HUD: level, time left, blinds, players left
@@ -745,37 +860,34 @@ draw_table(ClientData &cd, int w, int h)
                         ant = jval<int>(state["blinds"], "ante", 0);
                 }
 
-                int hud_x = 15;
-                int hud_y = (ih - 62) / 2;
-                DrawRectangle(hud_x - 6, hud_y - 4, 122, 62, Color{ 20, 20, 20, 200 });
-                DrawRectangleLines(hud_x - 6, hud_y - 4, 122, 62, DARKGRAY);
-
+                int hud_x = sc(15);
+                int hud_y = sc(8);
                 snprintf(tbuf, sizeof(tbuf) - 1, "Level %d  %d:%02d", level, secs / 60, secs % 60);
-                DrawText(tbuf, hud_x, hud_y, 16, WHITE);
+                DrawText(tbuf, hud_x, hud_y, sc(16), WHITE);
 
                 if (ant > 0) {
                         snprintf(tbuf, sizeof(tbuf) - 1, "Blinds %d/%d A:%d", bs, bb2, ant);
                 } else {
                         snprintf(tbuf, sizeof(tbuf) - 1, "Blinds %d/%d", bs, bb2);
                 }
-                DrawText(tbuf, hud_x, hud_y + 20, 14, GRAY);
+                DrawText(tbuf, hud_x, hud_y + sc(20), sc(14), GRAY);
 
                 snprintf(tbuf, sizeof(tbuf) - 1, "Players %d/%zu", alive, num_players);
-                DrawText(tbuf, hud_x, hud_y + 38, 14, GRAY);
+                DrawText(tbuf, hud_x, hud_y + sc(38), sc(14), GRAY);
 
                 // lifecycle overlays
                 std::string tstatus = jval<std::string>(state, "status", "");
                 if (tstatus == "lobby") {
                         snprintf(tbuf, sizeof(tbuf) - 1, "Waiting for players: %d/%zu", alive,
                                  num_players);
-                        DrawText(tbuf, (w - MeasureText(tbuf, 40)) / 2, ih / 2 - 60, 40, YELLOW);
+                        DrawText(tbuf, (w - MeasureText(tbuf, sc(40))) / 2, ih / 2 - sc(60), sc(40), YELLOW);
                 } else if (tstatus == "countdown") {
                         snprintf(tbuf, sizeof(tbuf) - 1, "Tournament starts in %.1fs",
                                  jval<double>(state, "countdown_seconds_remaining", 0.0));
-                        DrawText(tbuf, (w - MeasureText(tbuf, 40)) / 2, ih / 2 - 60, 40, YELLOW);
+                        DrawText(tbuf, (w - MeasureText(tbuf, sc(40))) / 2, ih / 2 - sc(60), sc(40), YELLOW);
                 } else if (tstatus == "finished") {
-                        int box_w = 420;
-                        int box_h = 170;
+                        int box_w = sc(420);
+                        int box_h = sc(170);
                         int box_x = (w - box_w) / 2;
                         int box_y = (ih - box_h) / 2;
 
@@ -783,11 +895,11 @@ draw_table(ClientData &cd, int w, int h)
                         DrawRectangleLines(box_x, box_y, box_w, box_h, GOLD);
 
                         const char *hdr = "TOURNAMENT OVER";
-                        DrawText(hdr, box_x + (box_w - MeasureText(hdr, 28)) / 2, box_y + 16, 28, GOLD);
+                        DrawText(hdr, box_x + (box_w - MeasureText(hdr, sc(28))) / 2, box_y + sc(16), sc(28), GOLD);
 
                         std::string wname = cd.tournament_winner.empty() ? "Champion" : cd.tournament_winner;
                         snprintf(tbuf, sizeof(tbuf) - 1, "Winner: %s", wname.c_str());
-                        DrawText(tbuf, box_x + (box_w - MeasureText(tbuf, 24)) / 2, box_y + 54, 24, WHITE);
+                        DrawText(tbuf, box_x + (box_w - MeasureText(tbuf, sc(24))) / 2, box_y + sc(54), sc(24), WHITE);
 
                         int award = cd.tournament_award;
                         if (award <= 0 && state.contains("players") && state["players"].is_array()) {
@@ -802,24 +914,24 @@ draw_table(ClientData &cd, int w, int h)
                         } else {
                                 snprintf(tbuf, sizeof(tbuf) - 1, "Winner takes all!");
                         }
-                        DrawText(tbuf, box_x + (box_w - MeasureText(tbuf, 22)) / 2, box_y + 88, 22, ORANGE);
+                        DrawText(tbuf, box_x + (box_w - MeasureText(tbuf, sc(22))) / 2, box_y + sc(88), sc(22), ORANGE);
 
                         snprintf(tbuf, sizeof(tbuf) - 1, "Final Level: Level %d (Blinds %d/%d)", level, bs, bb2);
-                        DrawText(tbuf, box_x + (box_w - MeasureText(tbuf, 18)) / 2, box_y + 124, 18, GRAY);
+                        DrawText(tbuf, box_x + (box_w - MeasureText(tbuf, sc(18))) / 2, box_y + sc(124), sc(18), GRAY);
                 }
 
                 if (!cd.tournament_event_text.empty() && Bot::now() - cd.tournament_event_since < 4.0) {
-                        int font_size = 24;
+                        int font_size = sc(24);
                         int tw = MeasureText(cd.tournament_event_text.c_str(), font_size);
-                        DrawRectangle((w - tw - 20) / 2, 80, tw + 20, font_size + 10, Fade(GOLD, 0.8f));
-                        DrawText(cd.tournament_event_text.c_str(), (w - tw) / 2, 85, font_size, BLACK);
+                        DrawRectangle((w - tw - sc(20)) / 2, sc(80), tw + sc(20), font_size + sc(10), Fade(GOLD, 0.8f));
+                        DrawText(cd.tournament_event_text.c_str(), (w - tw) / 2, sc(85), font_size, BLACK);
                 }
         }
 
         if (!cd.result_text.empty()) {
                 DrawText(cd.result_text.c_str(),
-                         (w - MeasureText(cd.result_text.c_str(), 20)) / 2,
-                         my - 100, 20, WHITE);
+                         (w - MeasureText(cd.result_text.c_str(), sc(20))) / 2,
+                         my - sc(100), sc(20), WHITE);
         }
 
         draw_buttons(cd, state, w, h);
@@ -830,11 +942,29 @@ draw_table(ClientData &cd, int w, int h)
 // 3.2, so a ticker thread cancels it every 16 ms to keep the loop moving)
 // ---------------------------------------------------------------------------
 
+// Pick the largest discrete UI level that fits the window. Level 2.0 is the
+// current look (96x128 cards, fonts 20) at a 1280x720 window; the layout
+// needs w >= 136*level and h >= 360*level (seat ring clears the board text).
+static void
+auto_scale(int w, int h)
+{
+        const float levels[] = { 2.0f, 1.5f, 1.25f, 1.0f, 0.75f, 0.5f };
+        const float fit      = std::min(w / 136.0f, h / 360.0f);
+        ui_scale             = 0.5f;
+        for (float l : levels) {
+                if (fit >= l - 0.02f) {
+                        ui_scale = l;
+                        break;
+                }
+        }
+}
+
 int
 main(int argc, char **argv)
 {
         int port = 9000;
         std::string host = "127.0.0.1", token, name;
+        float scale_override = 0.0f; // 0 = auto-fit from the window size
 
         for (int i = 1; i < argc; i++) {
                 if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
@@ -845,9 +975,15 @@ main(int argc, char **argv)
                         token = argv[++i];
                 } else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
                         name = argv[++i];
+                } else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
+                        scale_override = atof(argv[++i]);
+                        if (scale_override < 0.5f || scale_override > 2.0f) {
+                                fprintf(stderr, "error: --scale must be in [0.5, 2.0]\n");
+                                return 1;
+                        }
                 } else {
                         fprintf(stderr,
-                                "usage: %s [--port N] [--host IP] [--token SECRET] [--name NAME]\n",
+                                "usage: %s [--port N] [--host IP] [--token SECRET] [--name NAME] [--scale N]\n",
                                 argv[0]);
                         return 1;
                 }
@@ -863,7 +999,7 @@ main(int argc, char **argv)
 
         const char *name_arg = name.empty() ? nullptr : name.c_str();
         const char *tok_arg  = token.empty() ? nullptr : token.c_str();
-        Bot bot(ctx, host.c_str(), port, 0, false, true, tok_arg, name_arg);
+        Bot bot(ctx, host.c_str(), port, 0, false, true, tok_arg, name_arg, 0.0, true);
         printf("client: connecting to %s:%d as %s\n", host.c_str(), port, bot.name().c_str());
 
         std::atomic<bool> running{ true };
@@ -877,6 +1013,12 @@ main(int argc, char **argv)
         SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
         SetTraceLogLevel(LOG_WARNING);
         InitWindow(win.width, win.height, win.title);
+
+        if (scale_override > 0.0f) {
+                ui_scale = scale_override;
+        } else {
+                auto_scale(win.width, win.height);
+        }
 
         // cd to the executable path so relative paths work fine; when built
         // into client/build/ the deck images live two levels up
@@ -895,6 +1037,7 @@ main(int argc, char **argv)
                 if (IsWindowResized()) {
                         win.height = GetScreenHeight();
                         win.width  = GetScreenWidth();
+                        if (scale_override <= 0.0f) auto_scale(win.width, win.height);
                 }
 
                 lws_service(ctx, 0);

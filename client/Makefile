@@ -13,8 +13,6 @@ FLAGS += -I../thirdparty/PokerHandEvaluator/cpp/include
 FLAGS += -I../thirdparty/raylib/src
 FLAGS += -I../thirdparty/nlohmann/single_include
 
-LWS_LIBS = -lwebsockets -lcap -lsystemd
-
 .PHONY: all clean
 
 .DEFAULT_GOAL := all
@@ -25,7 +23,7 @@ all: $(OUT)
 
 $(OUT): $(SRC) $(PHEVAL_LIB) $(RAYLIB_LIB)
 	@mkdir -p $(dir $@)
-	$(CXX) $(FLAGS) $(SRC) $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIBS) -o $@
+	$(CXX) $(FLAGS) $(SRC) $(PHEVAL_LIB) $(RAYLIB_LIB) $(RAYLIB_LINK_LIBS) $(LWS_LIBS) -o $@
 
 clean:
 	rm -rf build

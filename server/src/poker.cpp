@@ -64,7 +64,10 @@ Player::ask_for_action(const Game_State *state)
         this->response.has_response = true;
 
         int to_call = state->current_bet - this->_street_bet;
-        bool strong = this->rank.value() > 0 && this->rank.value() < 2000;
+        // rank is only valid once the board has been evaluated (flop+);
+        // preflop it is still the zero-init default — guard against UB.
+        bool strong = this->hand.has_value() && this->rank.value() > 0 &&
+                      this->rank.value() < 2000;
 
         if (to_call <= 0) {
                 // free action: check or bet
@@ -214,10 +217,24 @@ Table::next_active_player(int from) const
 bool
 Table::needs_action(const Game_State *state) const
 {
+        // Count players who can still put chips in (not all-in, not folded).
+        // If only one such player remains, there is nobody to call a new bet,
+        // so further voluntary betting is pointless.  We only keep the round
+        // open for that lone player if they still owe chips on the current bet
+        // (i.e. they haven't matched a previous raise yet).
+        int active = 0;
+        for (const Player &p : this->players) {
+                if (!p.busted && !p._fold && !p.is_all_in) active++;
+        }
         for (const Player &p : this->players) {
                 if (p.busted || p._fold || p.is_all_in) continue;
-                if (!p.has_acted || p._street_bet < state->current_bet) {
-                        return true;
+                if (active <= 1) {
+                        // Only keep the round open if they still must call.
+                        if (p._street_bet < state->current_bet) return true;
+                } else {
+                        if (!p.has_acted || p._street_bet < state->current_bet) {
+                                return true;
+                        }
                 }
         }
         return false;
@@ -375,9 +392,9 @@ Table::step_betting_round(Game_State *state, double now)
 
         if (now - p.action_start > this->action_timeout) {
                 printf("%s: timeout, folds\n", p.name.c_str());
-                p._fold = true;
-                p.clear_response();
+                p._fold      = true;
                 p.is_my_turn = false;
+                p.clear_response();
                 if (this->non_folded_count() <= 1) {
                         state->round_done = true;
                         return;
@@ -405,7 +422,13 @@ Table::process_action(Game_State *state, Player &p)
                 break;
 
         case Player::Response::CHECK:
-                assert(to_call <= 0);
+                // Normally to_call == 0 (validated upstream), but if a
+                // queued action arrives after an intervening raise, treat it
+                // as a fold rather than asserting.
+                if (to_call > 0) {
+                        p._fold = true;
+                        break;
+                }
                 p.has_acted = true;
                 break;
 
@@ -544,14 +567,47 @@ Table::finish_hand(Game_State *state)
                 return;
         }
 
-        std::string names;
-        for (size_t i = 0; i < this->winners.size(); i++) {
-                if (i > 0) names += (this->winners.size() == 2 ? " and " : ", ");
-                names += this->players[this->winners[i]].name;
+        // Build a per-winner description.  When there are side pots the winners
+        // may hold completely different hands, so we list each one separately.
+        if (this->winners.size() == 1) {
+                this->result_text = this->players[this->winners[0]].name +
+                                    " wins " + std::to_string(this->award) + " with " +
+                                    this->players[this->winners[0]].describe_rank();
+        } else {
+                // Check if it is a genuine same-hand tie (all winners hold the
+                // exact same hand value) or multiple distinct pot winners.
+                int first_val = this->players[this->winners[0]].hand_value();
+                bool all_tied = true;
+                for (int w : this->winners) {
+                        if (this->players[w].hand_value() != first_val) {
+                                all_tied = false;
+                                break;
+                        }
+                }
+                if (all_tied) {
+                        // Genuine split pot: list all names.
+                        std::string names;
+                        for (size_t i = 0; i < this->winners.size(); i++) {
+                                if (i > 0)
+                                        names += (this->winners.size() == 2 ? " and " : ", ");
+                                names += this->players[this->winners[i]].name;
+                        }
+                        this->result_text = names + " split " + std::to_string(this->award) +
+                                            " with " + this->players[this->winners[0]].describe_rank();
+                } else {
+                        // Side-pot payouts: list each winner's individual amount and hand.
+                        std::string parts;
+                        for (size_t i = 0; i < this->winners.size(); i++) {
+                                int w = this->winners[i];
+                                int amt = (i < this->win_amount.size()) ? this->win_amount[i] : 0;
+                                if (i > 0) parts += "; ";
+                                parts += this->players[w].name + " wins " +
+                                         std::to_string(amt) + " (" +
+                                         this->players[w].describe_rank() + ")";
+                        }
+                        this->result_text = parts;
+                }
         }
-        this->result_text = names + (this->winners.size() > 1 ? " split " : " wins ") +
-                            std::to_string(this->award) + " with " +
-                            this->players[this->winners[0]].describe_rank();
 }
 
 void

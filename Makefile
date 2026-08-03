@@ -1,13 +1,13 @@
 # Umbrella: delegates to the server/ and bot/ projects, builds and runs the
 # tests (the only things that still live at the root).
 
+MAKE    = make -j $$(nproc)
+
 CXX     = g++
 FLAGS   = -Wall -Wextra -ggdb
 FLAGS  += -Iserver/src
 FLAGS  += -Ithirdparty/PokerHandEvaluator/cpp/include
 FLAGS  += -Ithirdparty/nlohmann/single_include
-
-LWS_LIBS = -lwebsockets -lcap -lsystemd
 
 .DEFAULT_GOAL := all
 
@@ -28,6 +28,7 @@ server:
 
 bot:
 	$(MAKE) -C bot/example
+	$(MAKE) -C bot/titan
 
 client:
 	$(MAKE) -C client
@@ -79,7 +80,7 @@ test: $(TEST_POKER_BIN) $(TEST_PROTO_BIN) $(TEST_SERVER_BIN) $(TEST_TOURNAMENT_B
 	./$(TEST_POKERSTARS_BIN)
 
 clean:
-	rm -rf server/build bot/example/build client/build test/build
+	rm -rf server/build bot/example/build bot/titan/build client/build test/build
 
 distclean: clean
-	rm -rf $(PHEVAL_PATH) $(RAYLIB_BUILD)
+	rm -rf $(PHEVAL_PATH) $(POKER_ROOT)/thirdparty/raylib/build*

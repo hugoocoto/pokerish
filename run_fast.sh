@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 
-# Exit immediately if a command fails during setup
+# Fast local smoke run: headless server in cash mode with simulation pacing
+# (--simulate), N-1 remote bots (1 Titan + 1 Python + rest C++ example) in
+# the background, and the human GUI client in the foreground.
+#
+# Usage: ./run_fast.sh [N]   (N = seats, 2-10, default 6)
+
 set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
-# Usage: ./run_tournament.sh [N]   (N = seats, 2-10, default 6)
 PLAYERS="${1:-6}"
 if ! [[ "$PLAYERS" =~ ^[0-9]+$ ]] || [ "$PLAYERS" -lt 2 ] || [ "$PLAYERS" -gt 10 ]; then
         echo "usage: $0 [N]   (N = seats, 2-10, default 6)" >&2
@@ -36,15 +40,16 @@ cleanup() {
         fi
     done
     wait 2>/dev/null || true
-    echo "==> Tournament finished."
+    echo "==> Done."
 }
 
-# Kill background processes ONLY when interrupted (Ctrl+C / SIGINT / SIGTERM)
-trap cleanup INT TERM
+# Kill background processes and exit on Ctrl+C / SIGINT / SIGTERM. Bash
+# defers the trap until the foreground command (e.g. make) finishes, so
+# cleanup + exit here covers signals arriving at any point.
+trap 'cleanup; exit 1' INT TERM
 
-echo "==> Starting tournament server ($PLAYERS seats, 120s levels)..."
-./server/build/server --tournament --simulate --max-players "$PLAYERS" --level-seconds 120 > /dev/null 2>&1 &
-# ./server/build/server --tournament --simulate --max-players "$PLAYERS" --level-seconds 120 --headless > /dev/null 2>&1 &
+echo "==> Starting headless server ($PLAYERS seats, simulate mode)..."
+./server/build/server --headless --max-players "$PLAYERS" --simulate > /dev/null 2>&1 &
 SERVER_PID=$!
 PIDS+=("$SERVER_PID")
 
@@ -55,7 +60,7 @@ echo "==> Spawning $((PLAYERS - 1)) bot(s): 1 Titan + 1 Python + C++ examples...
 PIDS+=($!)
 
 if [ "$PLAYERS" -gt 2 ]; then
-        bot/python/venv/bin/python bot/python/bot.py --name "PyBot_1" > /dev/null 2>&1 &
+        bot/python/venv/bin/python bot/python/bot.py --name "PyBot" > /dev/null 2>&1 &
         PIDS+=($!)
 fi
 
@@ -70,12 +75,15 @@ done
 
 sleep 1
 
-echo "==> Launching Human GUI client (Seat $PLAYERS)..."
+echo "==> Launching human GUI client..."
 set +e
-./client/build/client --name "HumanPlayer"
+./client/build/client --name "HumanPlayer" &
+CLIENT_PID=$!
+PIDS+=("$CLIENT_PID")
+# wait() runs the INT/TERM trap, so Ctrl+C (or timeout/kill) kills the
+# client too; closing the window ends the script normally
+wait "$CLIENT_PID" 2>/dev/null
+set -e
 
-echo ""
-echo "==> Human GUI client closed."
-echo "==> Tournament server & bots are continuing in the background."
-echo "==> Waiting for tournament to finish... (Press Ctrl+C to stop all)"
-wait "$SERVER_PID" 2>/dev/null || true
+cleanup
+exit 0

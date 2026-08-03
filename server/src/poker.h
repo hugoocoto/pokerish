@@ -13,7 +13,7 @@ constexpr int SmallBlind    = 5;
 constexpr int BigBlind      = 10;
 constexpr int StartStack    = 1000;
 constexpr int ActionTimeOut = 20; // in seconds
-constexpr int MaxPlayers    = 6;  // fixed for now
+constexpr int MaxPlayers    = 10; // hard cap; default table is 6 (--max-players)
 
 enum Stage {
         PREFLOP = 0,

@@ -2,10 +2,20 @@ name: tests
 
 on:
   push:
+  pull_request:
 
 jobs:
-  test:
+  linux:
+    name: Linux (${{ matrix.backend }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: wayland
+            apt: libwayland-dev libwayland-bin libxkbcommon-dev libgl1-mesa-dev
+          - backend: x11
+            apt: libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev libxkbcommon-dev libgl1-mesa-dev
     steps:
       - uses: actions/checkout@v7
         with:
@@ -14,7 +24,65 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebsockets-dev libcap-dev libsystemd-dev
+          sudo apt-get install -y \
+            libwebsockets-dev libcap-dev libsystemd-dev \
+            ${{ matrix.apt }}
 
-      - name: Build and run tests
+      - name: Build all binaries
+        run: make RAYLIB_PLATFORM=${{ matrix.backend }} -j2
+
+      - name: Run unit tests
         run: make test
+
+      - name: Play a live game (headless server + bot)
+        run: bash ci/smoke_game.sh
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install libwebsockets cmake
+
+      - name: Build all binaries
+        run: make RAYLIB_PLATFORM=macos -j2
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Play a live game (headless server + bot)
+        run: bash ci/smoke_game.sh
+
+  windows:
+    name: Windows (MinGW)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-libwebsockets
+            make
+
+      - name: Build all binaries
+        run: make RAYLIB_PLATFORM=windows -j2
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Play a live game (headless server + bot)
+        run: bash ci/smoke_game.sh

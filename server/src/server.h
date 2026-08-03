@@ -35,13 +35,37 @@ class Server
         Table &table() { return table_; }
         Game_State &state() { return state_; }
 
-        // seconds between hand_over and the next hand (tests shrink it)
+        // seconds between hand_over and the next hand. 0 by default: hands
+        // chain instantly; --simulate sets it to kSimulateHandPause unless
+        // the user overrides it (tests shrink it explicitly).
         double &hand_pause() { return hand_pause_; }
+
+        // what to do once a tournament is over (default: stay on the winner
+        // screen). EXIT stops the server (exit_requested() turns true, run()
+        // and the GUI loop return). RESTART kicks all clients and resets to a
+        // fresh lobby after hold_seconds on the winner screen.
+        enum class TournamentEndMode { STAY, EXIT, RESTART };
+        void set_tournament_end(TournamentEndMode mode, double hold_seconds = 5.0);
+        bool exit_requested() const { return exit_requested_; }
+
+        // simulate: every player's turn waits a random 1.0..max_seconds
+        // before its action takes effect, so fast bots appear to think
+        // (the randomness plays the role of indecision). A player who has
+        // already answered is never timed out: the delay is capped below
+        // the action timeout. Off by default.
+        void set_simulate(bool on, double max_seconds = 3.0);
 
         // seat -> name of the client queued to join that seat ("" = none)
         std::vector<std::string> waiting_names() const;
 
         static int game_id() { return 1; }
+
+        // the engine's monotonic clock (seconds since boot): run(), the GUI
+        // main loop and the tests all drive step() with it
+        static double now();
+
+        // the hand-over pause --simulate uses unless --hand-pause overrides it
+        static constexpr double kSimulateHandPause = 3.0;
 
     private:
         struct Session {
@@ -49,6 +73,7 @@ class Server
                 int seat{ -1 };        // -1 = connected, not seated
                 int pending_seat{ -1 }; // reserved bot seat, taken over at end of round
                 std::string name;      // hello name, applied when the seat is taken
+                bool is_human{ false }; // hello: apply actions with no simulated delay
                 std::string inbuf;
                 std::deque<std::string> outq;
         };
@@ -58,7 +83,6 @@ class Server
         static constexpr size_t kMaxOutqBytes = 512 * 1024; // per-client pending send queue
         static constexpr size_t kMaxNameLen = 24;  // hello names are truncated to this
         static constexpr int kHistoryMax = 200;
-        static constexpr double kHandPause = 3.0; // seconds between hand_over and next hand
 
         int port_;
         const char *host_;
@@ -96,10 +120,29 @@ class Server
         bool prev_hand_started_{ false };
         bool prev_hand_over_{ false };
 
-        double hand_pause_{ kHandPause }; // seconds between hand_over and next hand
+        double hand_pause_{ 0.0 }; // seconds between hand_over and next hand
         double hand_over_at_{ 0 };
         double last_now_{ 0 }; // last engine clock value, for deadline messages
         std::deque<nlohmann::json> history_;
+
+        // tournament end behavior (--tournament-end / --tournament-end-hold)
+        TournamentEndMode tournament_end_mode_{ TournamentEndMode::STAY };
+        double tournament_end_hold_{ 5.0 };
+        double tournament_end_at_{ 0 }; // monotonic time T_FINISHED was reached
+        bool exit_requested_{ false };
+
+        // --simulate support
+        bool simulate_{ false };
+        double simulate_max_{ 3.0 }; // think delay is random in [1.0, max]
+        struct PendingAction {
+                int seat{ -1 };
+                Player::Response resp;
+                double apply_at{ 0 }; // monotonic time when the action takes effect
+                bool active{ false };
+        };
+        PendingAction pending_action_; // remote player answered but is "thinking"
+        int hold_seat_{ -2 };          // auto-bot turn being held ("thinking")
+        double hold_until_{ 0 };
 
         Session *session_of(lws *wsi) const;
         std::vector<lws *> &conns();
@@ -118,6 +161,7 @@ class Server
         void give_bot(int seat);
         void process_round_end(); // pending joins + bot takeovers at hand boundary
         void disconnect(Session *s, lws *wsi);
+        void restart_tournament(); // kick everyone, reset to a fresh lobby
 
         void step(double now);
         void detect_events(double now);

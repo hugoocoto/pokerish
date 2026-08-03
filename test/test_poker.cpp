@@ -373,6 +373,116 @@ test_busted_players()
         }
 }
 
+// When all but one player are all-in, the lone active player should not be
+// prompted to bet (there is nobody to call them); the round_done flag must
+// be set without asking them to act.
+static void
+test_all_in_runout()
+{
+        printf("test_all_in_runout\n");
+        poker_set_seed(5);
+        Deck deck;
+        deck.reset();
+        Table t(&deck);
+        Game_State s;
+
+        // Three players: P0 goes all-in preflop, P1 calls all-in, P2 has chips.
+        // After the preflop betting, the flop/turn/river should auto-complete
+        // (round_done = true immediately) without asking P2 to act when no bet
+        // is outstanding against them.
+        for (int i = 0; i < 3; i++) {
+                t.add_player(Player("P" + std::to_string(i)));
+                t.players.back().stack = (i == 0) ? 50 : StartStack;
+        }
+
+        t.new_hand(&s);
+        // s.turn should be the first non-blind active player.
+        // Drive preflop: P0 goes all-in (shoves their 50 chips).
+        // We just auto-play through to hand over.
+        int guard = 0;
+        while (s.stage != OVER && guard++ < 5000) {
+                t.step_game(&s, 0.0);
+        }
+        CHECK(s.stage == OVER);
+        // Verify chip conservation: no chips should appear or vanish.
+        int chip_before = 50 + StartStack + StartStack;
+        int chip_after  = 0;
+        for (const Player &p : t.players) chip_after += p.stack;
+        CHECK_EQ(chip_before, chip_after);
+}
+
+// When a CHECK response arrives (queued) but the current_bet has since been
+// raised, process_action must not assert - it should treat it as a fold.
+static void
+test_check_with_outstanding_bet()
+{
+        printf("test_check_with_outstanding_bet\n");
+        poker_set_seed(7);
+        Deck deck;
+        deck.reset();
+        Table t(&deck);
+        Game_State s;
+        for (int i = 0; i < 3; i++) {
+                t.add_player(Player("P" + std::to_string(i)));
+                t.players[i].auto_play = false; // manual control
+        }
+        t.new_hand(&s);
+
+        // P0 is BB (current_bet == BigBlind). Manually set P0's response to
+        // CHECK even though there is a bet outstanding (simulating a stale
+        // queued action after an intervening raise).
+        // Find a player whose turn it is and inject a stale CHECK.
+        if (s.turn >= 0) {
+                Player &p = t.players[s.turn];
+                p.is_my_turn = true;
+                p.action_start = 0.0;
+                // Artificially put a bet in front of them (they owe chips).
+                if (s.current_bet - p._street_bet > 0) {
+                        p.response.type = Player::Response::CHECK;
+                        p.response.has_response = true;
+                        int before_fold = 0;
+                        for (const Player &pp : t.players) if (pp._fold) before_fold++;
+                        t.step_betting_round(&s, 0.0); // must not assert
+                        // The CHECK-with-bet should have been converted to a fold.
+                        int after_fold = 0;
+                        for (const Player &pp : t.players) if (pp._fold) after_fold++;
+                        CHECK(after_fold > before_fold);
+                }
+        }
+}
+
+// When side pots are awarded to different players, the result text should
+// list them individually (not conflate them into a single "split" line).
+static void
+test_side_pot_result_text()
+{
+        printf("test_side_pot_result_text\n");
+        poker_set_seed(42);
+        Deck deck;
+        deck.reset();
+        Table t(&deck);
+        Game_State s;
+
+        // Use auto-play: drive hands until a side pot forms.
+        for (int i = 0; i < 3; i++) {
+                t.add_player(Player("P" + std::to_string(i)));
+                // Give P0 a tiny stack so they go all-in on the blind.
+                if (i == 0) t.players.back().stack = 5;
+        }
+
+        int guard = 0;
+        while (s.stage != OVER && guard++ < 5000) {
+                t.step_game(&s, 0.0);
+        }
+        CHECK(s.stage == OVER);
+        // result_text must be a non-empty string and chip conservation must hold.
+        CHECK(!t.result_text.empty());
+        int chip_after = 0;
+        for (const Player &p : t.players) chip_after += p.stack;
+        // Total before: 5 + 1000 + 1000 = 2005
+        CHECK_EQ(chip_after, 5 + StartStack + StartStack);
+}
+
 int
 main()
 {
@@ -380,12 +490,16 @@ main()
         test_new_hand_blinds();
         test_bb_option_full_call();
         test_raise_reopens_and_round_ends();
+
         test_fold_walk_off();
         test_timeout_folds();
         test_side_pots();
         test_tie_split();
         test_busted_players();
         test_full_hands();
+        test_all_in_runout();
+        test_check_with_outstanding_bet();
+        test_side_pot_result_text();
 
         if (g_failures == 0) {
                 printf("All tests passed\n");

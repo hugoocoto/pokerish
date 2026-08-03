@@ -39,6 +39,19 @@ test_parse()
               proto::Err::NONE);
         CHECK(m.type == proto::MsgType::HELLO);
         CHECK(m.name == "Al");
+        CHECK(m.is_human == false);
+
+        CHECK(proto::parse_message(
+                      "{ \"type\": \"hello\", \"name\": \"Al\", \"is_human\": true }", m) ==
+              proto::Err::NONE);
+        CHECK(m.is_human == true);
+        CHECK(proto::parse_message(
+                      "{ \"type\": \"hello\", \"name\": \"Al\", \"is_human\": false }", m) ==
+              proto::Err::NONE);
+        CHECK(m.is_human == false);
+        CHECK(proto::parse_message(
+                      "{ \"type\": \"hello\", \"name\": \"Al\", \"is_human\": 1 }", m) ==
+              proto::Err::BAD_REQUEST);
 
         CHECK(proto::parse_message("{ \"type\": \"action\", \"action\": \"allin\" }", m) ==
               proto::Err::UNKNOWN_ACTION);
@@ -192,7 +205,7 @@ test_state_json()
         CHECK(j["hand_over"] == false);
         CHECK_EQ(j["timeout_seconds"], 20);
         CHECK_EQ(j["start_stack"], 1000);
-        CHECK_EQ(j["max_players"], 6);
+        CHECK_EQ(j["max_players"], MaxPlayers);
         CHECK_EQ(j["common"].size(), 5);
         CHECK(j["common"][0] == "As");
         CHECK(j["common"][1] == "Kd");

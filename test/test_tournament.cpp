@@ -13,16 +13,14 @@
 #include "../server/src/server.h"
 #include "../server/src/tournament.h"
 
-#include <arpa/inet.h>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <functional>
-#include <netinet/in.h>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
+
+#include "platform.h"
 
 static int g_failures = 0;
 
@@ -47,6 +45,7 @@ static int g_failures = 0;
 static int
 find_free_port()
 {
+        socket_lib_init();
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         struct sockaddr_in a{};
         a.sin_family      = AF_INET;
@@ -56,7 +55,7 @@ find_free_port()
         socklen_t alen = sizeof(a);
         getsockname(fd, (struct sockaddr *) &a, &alen);
         int port = ntohs(a.sin_port);
-        close(fd);
+        sock_close(fd);
         return port;
 }
 
@@ -599,11 +598,196 @@ test_heads_up_and_winner()
 }
 
 static void
+test_tournament_end_modes()
+{
+        // RESTART: after the winner-screen hold everyone is kicked and the
+        // table resets to a fresh lobby; reconnecting clients play a second
+        // tournament to completion.
+        {
+                int port = find_free_port();
+                Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
+                           /*tournament=*/true, /*level_seconds=*/2, /*countdown=*/0.5,
+                           /*start_stack=*/1000, /*max_players=*/2);
+                srv.table().action_timeout = 1e9;
+                srv.hand_pause()           = 0.1;
+                srv.set_tournament_end(Server::TournamentEndMode::RESTART, 0.3);
+                g_destroyed = 0;
+                g_srv = &srv;
+                g_clients = make_clients(port, 2);
+                CHECK(wait_until([&] { return all_seated(g_clients); }, 10.0));
+                CHECK(wait_until([&] { return g_srv->state().tournament_status == T_RUNNING; }, 10.0));
+
+                // heads-up: bust one seat, the other wins the tournament
+                bust_seat(0);
+                CHECK(wait_until([&] { return g_srv->state().tournament_status == T_FINISHED; }, 10.0));
+                CHECK(wait_until([&] { return seen("tournament_over"); }, 5.0));
+
+                // after the hold: both clients are kicked, the table is back
+                // to an empty lobby
+                CHECK(wait_until([&] { return !g_clients[0]->connected() && !g_clients[1]->connected(); }, 5.0));
+                CHECK(wait_until([&] { return g_srv->state().tournament_status == T_LOBBY; }, 5.0));
+                CHECK_EQ(g_srv->table().alive_count(), 0);
+                for (int i = 0; i < 2; i++) CHECK(g_srv->table().players[i].busted);
+
+                // fresh clients rejoin the lobby and a second tournament runs
+                // to a winner (the harness never pumps, so no auto-reconnect)
+                for (Bot *b : g_clients) delete b;
+                g_clients.clear();
+                g_clients = make_clients(port, 2);
+                CHECK(wait_until([&] { return all_seated(g_clients); }, 15.0));
+                CHECK(wait_until([&] { return g_srv->state().tournament_status == T_RUNNING; }, 10.0));
+                int overs_before = 0;
+                seen("hand_over", &overs_before);
+                bust_seat(g_clients[1]->seat());
+                CHECK(wait_until([&] { return g_srv->state().tournament_status == T_FINISHED; }, 15.0));
+                // the broadcast arrives a frame after the status flips
+                CHECK(wait_until([&] {
+                        int n = 0;
+                        seen("tournament_over", &n);
+                        return n >= 2;
+                }, 5.0));
+
+                for (Bot *b : g_clients) delete b;
+                g_clients.clear();
+                g_msgs.clear();
+                srv.stop();
+        }
+
+        // EXIT: the server raises exit_requested() once the winner is declared
+        {
+                int port = find_free_port();
+                Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
+                           /*tournament=*/true, /*level_seconds=*/2, /*countdown=*/0.5,
+                           /*start_stack=*/1000, /*max_players=*/2);
+                srv.table().action_timeout = 1e9;
+                srv.hand_pause()           = 0.1;
+                srv.set_tournament_end(Server::TournamentEndMode::EXIT);
+                g_destroyed = 0;
+                g_srv = &srv;
+                g_clients = make_clients(port, 2);
+                CHECK(wait_until([&] { return all_seated(g_clients); }, 10.0));
+                CHECK(wait_until([&] { return g_srv->state().tournament_status == T_RUNNING; }, 10.0));
+                bust_seat(0);
+                CHECK(wait_until([&] { return srv.exit_requested(); }, 15.0));
+                CHECK(g_srv->state().tournament_status == T_FINISHED);
+
+                for (Bot *b : g_clients) delete b;
+                g_clients.clear();
+                g_msgs.clear();
+                srv.stop();
+        }
+}
+
+static void
 run_test(const char *name, void (*fn)())
 {
         double t0 = Bot::now();
         fn();
         printf("  %-24s %.2f s\n", name, Bot::now() - t0);
+}
+
+static void
+test_ten_player_tournament()
+{
+        int port = find_free_port();
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
+                   /*tournament=*/true, /*level_seconds=*/2, /*countdown=*/0.5,
+                   /*start_stack=*/1000, /*max_players=*/10);
+        srv.table().action_timeout = 1e9; // no timeout folds
+        srv.hand_pause()           = 0.1;
+        g_srv = &srv;
+        g_clients = make_clients(port, 10);
+
+        CHECK(wait_until([&] { return all_seated(g_clients); }, 10.0));
+        CHECK_EQ(g_srv->state().max_players, 10);
+        CHECK_EQ(g_srv->table().players.size(), 10);
+
+        // all ten seats fill -> countdown -> running
+        CHECK(wait_until([&] { return g_srv->state().tournament_status == T_COUNTDOWN; }, 5.0));
+        CHECK(wait_until([&] { return g_srv->state().tournament_status == T_RUNNING; }, 5.0));
+
+        // a full hand is dealt with all ten seats in
+        CHECK(wait_until([&] { return g_srv->state().hand_started; }, 5.0));
+        CHECK(wait_until([&] {
+                for (auto &m : g_msgs) {
+                        if (m.value("type", "") == "state" &&
+                            m.value("players_alive", 0) == 10) {
+                                return true;
+                        }
+                }
+                return false;
+        }, 5.0));
+        CHECK(wait_until([&] { return g_srv->state().hand_over; }, 15.0));
+        CHECK_EQ(g_srv->table().alive_count(), 10);
+
+        // a disconnect busts to 9 (deferred to the next round end)
+        Bot *leaver = g_clients[9];
+        int seat    = leaver->seat();
+        leaver->close(); // the object must stay alive (lws callback), so just leak it
+        g_clients.pop_back();
+        CHECK(wait_until([&] { return g_srv->table().alive_count() == 9; }, 15.0));
+        CHECK(wait_until([&] { return g_srv->table().players[seat].busted; }, 15.0));
+
+        for (Bot *b : g_clients) delete b;
+        g_clients.clear();
+        g_msgs.clear();
+        srv.stop();
+}
+
+// A player who disconnects mid-hand AND has their stack zeroed in the same
+// round-end (busted by chips, pending_bust_ set) must produce exactly ONE
+// player_out broadcast, not two.
+static void
+test_no_duplicate_player_out()
+{
+        int port = find_free_port();
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
+                   /*tournament=*/true, /*level_seconds=*/2, /*countdown=*/0.5);
+        srv.table().action_timeout = 1e9;
+        srv.hand_pause()           = 0.2;
+        g_srv    = &srv;
+        g_msgs.clear();
+        g_destroyed = 0;
+
+        g_clients = make_clients(port, 3);
+        CHECK(wait_until([&] { return all_seated(g_clients); }, 10.0));
+        advance(0.6); // let countdown fire + tournament_start
+
+        // Wait for the first hand to start running.
+        CHECK(wait_until([&] { return g_srv->state().stage != OVER; }, 10.0));
+
+        // Zero the third player's stack so they will be chip-busted at round end.
+        int leaver_seat = g_clients[2]->seat();
+        CHECK(leaver_seat >= 0);
+        g_destroyed += g_srv->table().players[leaver_seat].stack;
+        g_srv->table().players[leaver_seat].stack = 0;
+
+        // Also close their connection — this sets pending_bust_.
+        g_clients[2]->close();
+
+        // Advance until the bust is resolved.
+        CHECK(wait_until([&] {
+                return g_srv->table().players[leaver_seat].busted;
+        }, 15.0));
+        advance(0.5); // let any extra broadcasts arrive
+
+        // Count how many player_out events were fired for that seat.
+        int player_out_count = 0;
+        for (auto &m : g_msgs) {
+                if (m.value("type", "") == "player_out" &&
+                    m.value("seat", -1) == leaver_seat) {
+                        player_out_count++;
+                }
+        }
+        // Each client receives its own copy; we have 2 remaining clients, so
+        // the total count should be exactly 2 (one per remaining client), not 4.
+        CHECK(player_out_count <= 2);
+        CHECK(player_out_count >= 1); // at least one was fired
+
+        for (Bot *b : g_clients) delete b;
+        g_clients.clear();
+        g_msgs.clear();
+        srv.stop();
 }
 
 int
@@ -629,6 +813,9 @@ main()
         run_test("elimination_no_rebuy", test_elimination_no_rebuy);
         run_test("disconnect_eliminates", test_disconnect_eliminates);
         run_test("heads_up_and_winner", test_heads_up_and_winner);
+        run_test("tournament_end_modes", test_tournament_end_modes);
+        run_test("ten_player_tournament", test_ten_player_tournament);
+        run_test("no_duplicate_player_out", test_no_duplicate_player_out);
 
         ticker_run.store(false);
         ticker.join();

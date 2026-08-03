@@ -10,6 +10,20 @@
 
 static Rectangle default_card_size{ 0, 0, 96, 128 };
 
+// UI scale: user-facing level where 2.0 == the current look (96x128 cards,
+// fonts 20, at a 1280x720 window). Auto-fit picks the largest of the levels
+// {2.0, 1.5, 1.25, 1.0, 0.75, 0.5} that fits the window; --scale overrides.
+// Everything in the GUIs goes through sc()/scf().
+static float ui_scale = 2.0f;
+static inline int sc(int v)
+{
+        return (int) (v * ui_scale / 2.0f + 0.5f);
+}
+static inline float scf(float v)
+{
+        return v * ui_scale / 2.0f;
+}
+
 class Card
 {
     public:
@@ -71,12 +85,12 @@ Card::draw(int x, int y, Color tint)
         this->update_positon(x, y);
 
         if (this->draw_colliders) {
-                int t = 2;
+                int t = sc(2);
                 DrawRectangleLinesEx({
-                                     .x      = this->collision_box.x - t,
-                                     .y      = this->collision_box.y - t,
-                                     .width  = this->collision_box.width + t * 2,
-                                     .height = this->collision_box.height + t * 2,
+                                     .x      = (float) (x - t),
+                                     .y      = (float) (y - t),
+                                     .width  = (float) (sc(96) + t * 2),
+                                     .height = (float) (sc(128) + t * 2),
                                      },
                                      2 * t, BLUE);
         }
@@ -84,16 +98,19 @@ Card::draw(int x, int y, Color tint)
         this->reload_texture();
 
         if (IsTextureValid(this->texture)) {
-                DrawTexture(this->texture, x, y, tint);
+                DrawTextureEx(this->texture, Vector2{ (float) x, (float) y }, 0.0f,
+                              ui_scale / 2.0f, tint);
         } else {
                 // so we can see if there is a card with an invalid texure
-                DrawRectangle(x, y, this->collision_box.width, this->collision_box.height, RED);
-                DrawRectangleLines(x, y, this->collision_box.width, this->collision_box.height, WHITE);
-                DrawText("Invalid", x + 2, y + 2, 20, WHITE);
+                DrawRectangle(x, y, sc(96), sc(128), RED);
+                DrawRectangleLines(x, y, sc(96), sc(128), WHITE);
+                DrawText("Invalid", x + sc(2), y + sc(2), sc(20), WHITE);
         }
 
+        this->update_width(sc(96), sc(128)); // collision box matches the scaled draw
+
         if (this->draw_colliders) {
-                DrawCircleV(this->collision_point, 2, BLUE);
+                DrawCircleV(this->collision_point, sc(2), BLUE);
         }
 }
 

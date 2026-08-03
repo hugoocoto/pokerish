@@ -1,5 +1,6 @@
 # build artifacts
 build/
+thirdparty/raylib/build*/
 server/build/
 bot/example/build/
 test/build/
