@@ -6,12 +6,13 @@ OUT   = build/client
 SRC   = client.cpp
 
 CXX   = g++
-FLAGS = -Wall -Wextra -ggdb
+FLAGS = -Wall -Wextra -ggdb -std=c++17
 FLAGS += -I../server/src
 FLAGS += -I../bot/example
 FLAGS += -I../thirdparty/PokerHandEvaluator/cpp/include
 FLAGS += -I../thirdparty/raylib/src
 FLAGS += -I../thirdparty/nlohmann/single_include
+FLAGS += $(LWS_CPPFLAGS)
 
 .PHONY: all clean
 

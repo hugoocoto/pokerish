@@ -27,7 +27,33 @@
 #include <thread>
 #include <vector>
 
-#include <libwebsockets.h>
+// libwebsockets.h pulls in windows.h, whose names clash with raylib's
+// (Rectangle, CloseWindow, ShowCursor, LoadImage, DrawText...). Rename them
+// while windows.h is parsed, like raylib's own rcore_desktop_win32.c does,
+// so this file can be included in the same TU as raylib.h (the GUI client).
+#if defined(_WIN32)
+    #define CloseWindow CloseWindowLws
+    #define Rectangle  RectangleLws
+    #define ShowCursor ShowCursorLws
+    #define LoadImage  LoadImageLws
+    #define DrawTextA  DrawTextALws
+    #define DrawTextW  DrawTextWLws
+    #define DrawTextExA DrawTextExALws
+    #define DrawTextExW DrawTextExWLws
+    #include <libwebsockets.h>
+    #undef CloseWindow
+    #undef Rectangle
+    #undef ShowCursor
+    #undef LoadImage
+    #undef DrawTextA
+    #undef DrawTextW
+    #undef DrawTextExA
+    #undef DrawTextExW
+    #undef DrawText     // leftover winuser.h macros
+    #undef DrawTextEx
+#else
+    #include <libwebsockets.h>
+#endif
 #include <nlohmann/json.hpp>
 
 template <typename T>

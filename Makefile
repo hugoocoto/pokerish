@@ -1,13 +1,14 @@
 # Umbrella: delegates to the server/ and bot/ projects, builds and runs the
 # tests (the only things that still live at the root).
 
-MAKE    = make -j $$(nproc)
+MAKE    = make -j $$(getconf _NPROCESSORS_ONLN)
 
 CXX     = g++
-FLAGS   = -Wall -Wextra -ggdb
+FLAGS   = -Wall -Wextra -ggdb -std=c++17
 FLAGS  += -Iserver/src
 FLAGS  += -Ithirdparty/PokerHandEvaluator/cpp/include
 FLAGS  += -Ithirdparty/nlohmann/single_include
+FLAGS  += $(LWS_CPPFLAGS)
 
 .DEFAULT_GOAL := all
 
@@ -23,14 +24,17 @@ TEST_POKERSTARS_BIN = test/build/test_pokerstars_export
 
 all: server bot client
 
-server:
+# $(PHEVAL_LIB) is built here once, before the parallel sub-makes start:
+# running cmake into the same build dir from several sub-makes at once
+# corrupts the configure (server and bot/titan both depend on it).
+server: $(PHEVAL_LIB)
 	$(MAKE) -C server
 
-bot:
+bot: $(PHEVAL_LIB)
 	$(MAKE) -C bot/example
 	$(MAKE) -C bot/titan
 
-client:
+client: $(PHEVAL_LIB)
 	$(MAKE) -C client
 
 $(TEST_POKER_BIN): test/build/test_poker.o test/build/poker.o $(PHEVAL_LIB)

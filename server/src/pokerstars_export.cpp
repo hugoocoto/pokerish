@@ -15,7 +15,11 @@ current_timestamp_str()
         auto now = std::chrono::system_clock::now();
         std::time_t t = std::chrono::system_clock::to_time_t(now);
         std::tm tm_buf;
+#if defined(_WIN32)
+        localtime_s(&tm_buf, &t);
+#else
         localtime_r(&t, &tm_buf);
+#endif
         std::ostringstream ss;
         ss << std::put_time(&tm_buf, "%Y/%m/%d %H:%M:%S ET");
         return ss.str();
@@ -311,7 +315,11 @@ bool
 PokerStarsExporter::save_to_file(const std::string &dir_path, const std::string &filename) const
 {
         if (dir_path.empty()) return false;
+#if defined(_WIN32)
+        mkdir(dir_path.c_str());
+#else
         mkdir(dir_path.c_str(), 0755);
+#endif
 
         std::string filepath = dir_path;
         if (filepath.back() != '/') filepath += "/";

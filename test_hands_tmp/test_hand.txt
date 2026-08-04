@@ -701,3 +701,79 @@ Seat 2: Bot_1 (button) folded
 Seat 3: Bot_2 (small blind) folded
 Seat 4: Bot_3 (big blind) collected (50)
 
+PokerStars Hand #202: Tournament #1, Hold'em No Limit - Level II (10/20) - 2026/08/03 00:05:00 ET
+Table '1' 4-max Seat #2 is the button
+Seat 1: Bot_0 (1000 in chips)
+Seat 2: Bot_1 (1000 in chips)
+Seat 3: Bot_2 (1000 in chips)
+Seat 4: Bot_3 (1000 in chips)
+Bot_2: posts small blind 10
+Bot_3: posts big blind 20
+*** HOLE CARDS ***
+Bot_2: folds
+Bot_3: calls 20
+Bot_3 collected 50 from pot
+*** SUMMARY ***
+Total pot 50 | Rake 0
+Seat 1: Bot_0 folded
+Seat 2: Bot_1 (button) folded
+Seat 3: Bot_2 (small blind) folded
+Seat 4: Bot_3 (big blind) collected (50)
+
+PokerStars Hand #202: Tournament #1, Hold'em No Limit - Level II (10/20) - 2026/08/03 00:05:00 ET
+Table '1' 4-max Seat #2 is the button
+Seat 1: Bot_0 (1000 in chips)
+Seat 2: Bot_1 (1000 in chips)
+Seat 3: Bot_2 (1000 in chips)
+Seat 4: Bot_3 (1000 in chips)
+Bot_2: posts small blind 10
+Bot_3: posts big blind 20
+*** HOLE CARDS ***
+Bot_2: folds
+Bot_3: calls 20
+Bot_3 collected 50 from pot
+*** SUMMARY ***
+Total pot 50 | Rake 0
+Seat 1: Bot_0 folded
+Seat 2: Bot_1 (button) folded
+Seat 3: Bot_2 (small blind) folded
+Seat 4: Bot_3 (big blind) collected (50)
+
+PokerStars Hand #202: Tournament #1, Hold'em No Limit - Level II (10/20) - 2026/08/03 00:05:00 ET
+Table '1' 4-max Seat #2 is the button
+Seat 1: Bot_0 (1000 in chips)
+Seat 2: Bot_1 (1000 in chips)
+Seat 3: Bot_2 (1000 in chips)
+Seat 4: Bot_3 (1000 in chips)
+Bot_2: posts small blind 10
+Bot_3: posts big blind 20
+*** HOLE CARDS ***
+Bot_2: folds
+Bot_3: calls 20
+Bot_3 collected 50 from pot
+*** SUMMARY ***
+Total pot 50 | Rake 0
+Seat 1: Bot_0 folded
+Seat 2: Bot_1 (button) folded
+Seat 3: Bot_2 (small blind) folded
+Seat 4: Bot_3 (big blind) collected (50)
+
+PokerStars Hand #202: Tournament #1, Hold'em No Limit - Level II (10/20) - 2026/08/03 00:05:00 ET
+Table '1' 4-max Seat #2 is the button
+Seat 1: Bot_0 (1000 in chips)
+Seat 2: Bot_1 (1000 in chips)
+Seat 3: Bot_2 (1000 in chips)
+Seat 4: Bot_3 (1000 in chips)
+Bot_2: posts small blind 10
+Bot_3: posts big blind 20
+*** HOLE CARDS ***
+Bot_2: folds
+Bot_3: calls 20
+Bot_3 collected 50 from pot
+*** SUMMARY ***
+Total pot 50 | Rake 0
+Seat 1: Bot_0 folded
+Seat 2: Bot_1 (button) folded
+Seat 3: Bot_2 (small blind) folded
+Seat 4: Bot_3 (big blind) collected (50)
+

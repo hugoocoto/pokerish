@@ -4,11 +4,12 @@ OBJS    = $(patsubst src/%.cpp,build/%.o,$(SRCS))
 HEADERS = $(wildcard src/*.h)
 
 CXX     = g++
-FLAGS   = -Wall -Wextra -ggdb
+FLAGS   = -Wall -Wextra -ggdb -std=c++17
 
 FLAGS  += -I../thirdparty/PokerHandEvaluator/cpp/include
 FLAGS  += -I../thirdparty/raylib/src
 FLAGS  += -I../thirdparty/nlohmann/single_include
+FLAGS  += $(LWS_CPPFLAGS)
 
 .DEFAULT_GOAL := all
 

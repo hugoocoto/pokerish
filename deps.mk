@@ -67,10 +67,12 @@ else
   RAYLIB_LINK_LIBS =
 endif
 
-# libwebsockets link flags per platform (Linux keeps -lcap/-lsystemd, which
-# do not exist on macOS/Windows).
+# libwebsockets include/link flags per platform (Linux keeps -lcap/-lsystemd,
+# which do not exist on macOS/Windows). macOS needs the Homebrew include/lib
+# dirs explicitly: they are not on the default clang path.
 ifeq ($(RAYLIB_PLATFORM),macos)
-  LWS_LIBS = -lwebsockets
+  LWS_CPPFLAGS = -I$(shell brew --prefix)/include
+  LWS_LIBS = -L$(shell brew --prefix)/lib -lwebsockets
 else ifeq ($(RAYLIB_PLATFORM),windows)
   LWS_LIBS = -lwebsockets -lws2_32 -lcrypt32
 else
@@ -83,7 +85,7 @@ RAYLIB_BUILD = $(POKER_ROOT)/thirdparty/raylib/build-$(RAYLIB_PLATFORM)
 RAYLIB_LIB   = $(RAYLIB_BUILD)/raylib/libraylib.a
 
 $(PHEVAL_LIB):
-	cd $(POKER_ROOT)/thirdparty/PokerHandEvaluator/cpp && cmake -B build
+	cd $(POKER_ROOT)/thirdparty/PokerHandEvaluator/cpp && cmake -B build -DBUILD_TESTS=OFF
 	cmake --build $(PHEVAL_PATH) --target pheval
 
 $(RAYLIB_LIB):

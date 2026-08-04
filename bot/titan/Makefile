@@ -10,12 +10,11 @@ CXX   = g++
 FLAGS = -Wall -Wextra -ggdb -O2 -std=c++17
 FLAGS += -I../../thirdparty/nlohmann/single_include
 FLAGS += -I../../thirdparty/PokerHandEvaluator/cpp/include
+FLAGS += $(LWS_CPPFLAGS)
 
 include ../../deps.mk
 
 .DEFAULT_GOAL := all
-
-LWS_LIBS = -lwebsockets -lcap -lsystemd
 
 .PHONY: all clean
 

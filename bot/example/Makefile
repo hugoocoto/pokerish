@@ -10,11 +10,18 @@ OBJ   = build/bot.o
 SRC   = bot.cpp
 
 CXX   = g++
-FLAGS = -Wall -Wextra -ggdb
+FLAGS = -Wall -Wextra -ggdb -std=c++17
 FLAGS += -DBOT_EXAMPLE_STANDALONE
 FLAGS += -I../../thirdparty/nlohmann/single_include
 
-LWS_LIBS = -lwebsockets -lcap -lsystemd
+# Homebrew include/lib dirs are not on the default macOS compiler path.
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  FLAGS += -I$(shell brew --prefix)/include
+  LWS_LIBS = -L$(shell brew --prefix)/lib -lwebsockets
+else
+  LWS_LIBS = -lwebsockets -lcap -lsystemd
+endif
 
 .PHONY: all clean
 
