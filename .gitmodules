@@ -8,3 +8,6 @@
 [submodule "nlohmann"]
 	path = thirdparty/nlohmann
 	url = https://github.com/nlohmann/json
+[submodule "libwebsockets"]
+	path = thirdparty/libwebsockets
+	url = https://github.com/warmcat/libwebsockets.git

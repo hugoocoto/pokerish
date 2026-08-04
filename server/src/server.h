@@ -34,6 +34,16 @@
     #include <libwebsockets.h>
 #endif
 
+// The vendored libwebsockets build is a minimal ws-only config (deps.mk
+// passes -DLWS_WITH_HTTP2=OFF etc.). If build/include/lws_config.h is missing
+// when this TU compiles, the compiler silently falls back to the system
+// /usr/include/lws_config.h (libwebsockets-dev), whose much larger feature
+// set changes the layout of lws_context_creation_info -> NULL user space ->
+// crash on first connection. Only that system config defines LWS_WITH_HTTP2.
+#if defined(LWS_WITH_HTTP2)
+#error "compiled against the system libwebsockets config: missing thirdparty/libwebsockets/build/include/lws_config.h"
+#endif
+
 #include "poker.h"
 #include "pokerstars_export.h"
 #include "proto.h"

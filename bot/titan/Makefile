@@ -20,10 +20,10 @@ include ../../deps.mk
 
 all: $(OUT)
 
-$(OUT): $(OBJ) $(PHEVAL_LIB)
-	$(CXX) $(FLAGS) $(OBJ) $(PHEVAL_LIB) $(LWS_LIBS) -o $@
+$(OUT): $(OBJ) $(PHEVAL_LIB) $(LWS_LIB)
+	$(CXX) $(FLAGS) $(OBJ) $(PHEVAL_LIB) $(LWS_LIB) $(LWS_LINK_LIBS) -o $@
 
-$(OBJ): $(SRC)
+$(OBJ): $(SRC) $(LWS_LIB)
 	@mkdir -p $(dir $@)
 	$(CXX) $(FLAGS) -c $< -o $@
 

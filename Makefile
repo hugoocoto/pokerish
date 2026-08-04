@@ -44,12 +44,12 @@ $(TEST_PROTO_BIN): test/build/test_proto.o test/build/proto.o test/build/poker.o
 	$(CXX) $(FLAGS) $^ -o $@
 
 $(TEST_SERVER_BIN): test/build/test_server.o test/build/server.o test/build/proto.o \
-                    test/build/poker.o test/build/tournament.o test/build/pokerstars_export.o $(PHEVAL_LIB)
-	$(CXX) $(FLAGS) $^ $(LWS_LIBS) -o $@
+                    test/build/poker.o test/build/tournament.o test/build/pokerstars_export.o $(PHEVAL_LIB) $(LWS_LIB)
+	$(CXX) $(FLAGS) $^ $(LWS_LINK_LIBS) -o $@
 
 $(TEST_TOURNAMENT_BIN): test/build/test_tournament.o test/build/server.o test/build/proto.o \
-                        test/build/poker.o test/build/tournament.o test/build/pokerstars_export.o $(PHEVAL_LIB)
-	$(CXX) $(FLAGS) $^ $(LWS_LIBS) -o $@
+                        test/build/poker.o test/build/tournament.o test/build/pokerstars_export.o $(PHEVAL_LIB) $(LWS_LIB)
+	$(CXX) $(FLAGS) $^ $(LWS_LINK_LIBS) -o $@
 
 $(TEST_POKERSTARS_BIN): test/build/test_pokerstars_export.o test/build/pokerstars_export.o test/build/proto.o test/build/poker.o $(PHEVAL_LIB)
 	$(CXX) $(FLAGS) $^ -o $@
@@ -57,22 +57,22 @@ $(TEST_POKERSTARS_BIN): test/build/test_pokerstars_export.o test/build/pokerstar
 test/build/test_server.o: test/test_server.cpp bot/example/bot.cpp \
                           server/src/server.h server/src/proto.h \
                           server/src/poker.h server/src/tournament.h \
-                          server/src/pokerstars_export.h
+                          server/src/pokerstars_export.h $(LWS_LIB)
 	@mkdir -p $(dir $@)
 	$(CXX) $(FLAGS) -c $< -o $@
 
 test/build/test_tournament.o: test/test_tournament.cpp bot/example/bot.cpp \
                               server/src/server.h server/src/proto.h \
                               server/src/poker.h server/src/tournament.h \
-                              server/src/pokerstars_export.h
+                              server/src/pokerstars_export.h $(LWS_LIB)
 	@mkdir -p $(dir $@)
 	$(CXX) $(FLAGS) -c $< -o $@
 
-test/build/%.o: test/%.cpp
+test/build/%.o: test/%.cpp $(LWS_LIB)
 	@mkdir -p $(dir $@)
 	$(CXX) $(FLAGS) -c $< -o $@
 
-test/build/%.o: server/src/%.cpp
+test/build/%.o: server/src/%.cpp $(LWS_LIB)
 	@mkdir -p $(dir $@)
 	$(CXX) $(FLAGS) -c $< -o $@
 
@@ -87,4 +87,4 @@ clean:
 	rm -rf server/build bot/example/build bot/titan/build client/build test/build
 
 distclean: clean
-	rm -rf $(PHEVAL_PATH) $(POKER_ROOT)/thirdparty/raylib/build*
+	rm -rf $(PHEVAL_PATH) $(POKER_ROOT)/thirdparty/raylib/build* $(LWS_BUILD)

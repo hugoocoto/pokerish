@@ -22,9 +22,9 @@ include ../deps.mk
 
 all: $(OUT)
 
-$(OUT): $(SRC) $(PHEVAL_LIB) $(RAYLIB_LIB)
+$(OUT): $(SRC) $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIB)
 	@mkdir -p $(dir $@)
-	$(CXX) $(FLAGS) $(SRC) $(PHEVAL_LIB) $(RAYLIB_LIB) $(RAYLIB_LINK_LIBS) $(LWS_LIBS) -o $@
+	$(CXX) $(FLAGS) $(SRC) $(PHEVAL_LIB) $(RAYLIB_LIB) $(RAYLIB_LINK_LIBS) $(LWS_LIB) $(LWS_LINK_LIBS) -o $@
 
 clean:
 	rm -rf build

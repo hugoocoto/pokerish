@@ -1,7 +1,7 @@
-# Shared rules for the third-party static libraries (raylib, phevaluator).
-# Included by the root Makefile, server/Makefile and client/Makefile. Paths
-# are resolved from this file's own location, so it works regardless of
-# which Makefile includes it.
+# Shared rules for the third-party static libraries (raylib, phevaluator,
+# libwebsockets).  Included by the root Makefile, server/Makefile,
+# client/Makefile and bot/example/Makefile.  Paths are resolved from this
+# file's own location, so it works regardless of which Makefile includes it.
 
 # The raylib build is platform-configurable. RAYLIB_PLATFORM selects the
 # backend: "wayland", "x11", "macos" or "windows". When unset it is
@@ -71,17 +71,46 @@ else
   RAYLIB_LINK_LIBS =
 endif
 
-# libwebsockets include/link flags per platform (Linux keeps -lcap/-lsystemd,
-# which do not exist on macOS/Windows). macOS needs the Homebrew include/lib
-# dirs explicitly: they are not on the default clang path.
-ifeq ($(RAYLIB_PLATFORM),macos)
-  LWS_CPPFLAGS = -I$(shell brew --prefix)/include
-  LWS_LIBS = -L$(shell brew --prefix)/lib -lwebsockets
-else ifeq ($(RAYLIB_PLATFORM),windows)
-  LWS_LIBS = -lwebsockets -lws2_32 -lcrypt32
-else
-  LWS_LIBS = -lwebsockets -lcap -lsystemd
+# --- libwebsockets (vendored, built from source) ---
+LWS_PATH = $(POKER_ROOT)/thirdparty/libwebsockets
+LWS_BUILD = $(LWS_PATH)/build
+LWS_LIB   = $(LWS_BUILD)/lib/libwebsockets.a
+
+# Minimal ws-only build: no TLS, no extensions, no HTTP/2, no test apps.
+LWS_CMAKE_FLAGS = \
+	-DLWS_WITH_SSL=OFF \
+	-DLWS_WITHOUT_EXTENSIONS=ON \
+	-DLWS_WITH_HTTP2=OFF \
+	-DLWS_WITH_SECURE_STREAMS=OFF \
+	-DLWS_WITHOUT_TESTAPPS=ON \
+	-DLWS_WITH_STATIC=ON \
+	-DLWS_WITH_SHARED=OFF \
+	-DLWS_WITH_LIBCAP=OFF \
+	-DLWS_WITHOUT_TEST_SERVER=ON \
+	-DLWS_WITHOUT_TEST_PING=ON \
+	-DLWS_WITHOUT_TEST_CLIENT=ON
+
+ifeq ($(RAYLIB_PLATFORM),windows)
+  # MinGW generates MinGW Makefiles by default; force the generator and set
+  # Windows 10 API level for the build (lws calls Windows 10+ APIs on this
+  # platform).
+  LWS_CMAKE_FLAGS += -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00"
+  LWS_CMAKE_GENERATOR = -G "MinGW Makefiles"
 endif
+
+# lws is linked as a plain static archive, so platform link libs must be
+# supplied at app link time. Windows needs winsock; Linux needs pthreads.
+ifeq ($(RAYLIB_PLATFORM),windows)
+  LWS_LINK_LIBS = -lws2_32 -lcrypt32 -ladvapi32 -luser32
+else ifeq ($(RAYLIB_PLATFORM),macos)
+  LWS_LINK_LIBS =
+else
+  LWS_LINK_LIBS = -lpthread -lm
+endif
+
+# LWS_CPPFLAGS / LWS_LIBS are consumed by every Makefile that links lws.
+LWS_CPPFLAGS = -I$(LWS_PATH)/include -I$(LWS_BUILD)/include
+LWS_LIBS     = $(LWS_LIB) $(LWS_LINK_LIBS)
 
 # One build directory per platform so switching backends never reuses a
 # stale cmake cache.
@@ -100,3 +129,10 @@ $(RAYLIB_LIB):
 		-DBUILD_EXAMPLES=OFF \
 		$(RAYLIB_CMAKE_FLAGS) $(RAYLIB_CMAKE_GENERATOR)
 	cmake --build $(RAYLIB_BUILD) --parallel
+
+$(LWS_LIB):
+	mkdir -p $(LWS_BUILD)
+	cmake -S $(LWS_PATH) -B $(LWS_BUILD) \
+		-DCMAKE_BUILD_TYPE=Release \
+		$(LWS_CMAKE_FLAGS) $(LWS_CMAKE_GENERATOR)
+	cmake --build $(LWS_BUILD) --parallel

@@ -19,10 +19,10 @@ include ../deps.mk
 
 all: $(OUT)
 
-$(OUT): $(OBJS) $(PHEVAL_LIB) $(RAYLIB_LIB)
-	$(CXX) $(FLAGS) $(OBJS) $(PHEVAL_LIB) $(RAYLIB_LIB) $(RAYLIB_LINK_LIBS) $(LWS_LIBS) -o $@
+$(OUT): $(OBJS) $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIB)
+	$(CXX) $(FLAGS) $(OBJS) $(PHEVAL_LIB) $(RAYLIB_LIB) $(RAYLIB_LINK_LIBS) $(LWS_LIB) $(LWS_LINK_LIBS) -o $@
 
-build/%.o: src/%.cpp $(HEADERS)
+build/%.o: src/%.cpp $(HEADERS) $(LWS_LIB)
 	@mkdir -p $(dir $@)
 	$(CXX) $(FLAGS) -c $< -o $@
 

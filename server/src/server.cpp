@@ -140,9 +140,13 @@ Server::Server(int port, const char *host, const char *token, bool verbose,
 
         struct lws_context_creation_info info{};
         info.port      = port_;
-        info.iface     = host_; // nullptr = all interfaces
+        // lws 5.0 treats iface as a device name for SO_BINDTODEVICE, which
+        // fails with IP addresses like "127.0.0.1".  Pass nullptr (listen on
+        // all interfaces) — clients connect to the IP separately.
+        info.iface     = nullptr;
         info.protocols = protocols;
         info.user      = this;
+        info.pt_serv_buf_size = 4096; // explicit: handshake_0405 uses serv_buf
         ctx_ = lws_create_context(&info);
         if (!ctx_) {
                 fprintf(stderr, "lws_create_context failed (port %d)\n", port_);

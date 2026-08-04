@@ -54,6 +54,14 @@
 #else
     #include <libwebsockets.h>
 #endif
+// Tripwire: the vendored libwebsockets build is minimal ws-only (deps.mk),
+// and if its generated build/include/lws_config.h is missing at compile time
+// the compiler silently falls back to /usr/include/lws_config.h, changing
+// lws_context_creation_info's layout (runtime crash). Only the system config
+// defines LWS_WITH_HTTP2.
+#if defined(LWS_WITH_HTTP2)
+#error "compiled against the system libwebsockets config: missing thirdparty/libwebsockets/build/include/lws_config.h"
+#endif
 #include <nlohmann/json.hpp>
 
 template <typename T>
@@ -206,6 +214,7 @@ bot_context()
         struct lws_context_creation_info info{};
         info.port      = CONTEXT_PORT_NO_LISTEN;
         info.protocols = protocols;
+        info.pt_serv_buf_size = 4096;
         return lws_create_context(&info);
 }
 
@@ -219,6 +228,7 @@ Bot::connect()
         struct lws_client_connect_info i{};
         i.context                   = ctx_;
         i.address                   = host_.c_str();
+        i.host                      = host_.c_str(); // Host: header (required by lws 5)
         i.port                      = port_;
         i.path                      = "/";
         i.protocol                  = "poker";

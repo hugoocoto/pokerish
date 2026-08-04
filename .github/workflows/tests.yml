@@ -25,7 +25,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebsockets-dev libcap-dev libsystemd-dev \
             ${{ matrix.apt }}
 
       - name: Build all binaries
@@ -46,7 +45,7 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
-        run: brew install libwebsockets cmake
+        run: brew install cmake
 
       - name: Build all binaries
         run: make RAYLIB_PLATFORM=macos -j2
@@ -75,7 +74,6 @@ jobs:
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-libwebsockets
             mingw-w64-x86_64-make
             make
 
