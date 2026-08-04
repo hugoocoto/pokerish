@@ -461,6 +461,9 @@ call_pct(double needed)
 // Game model (parsed from a state broadcast)
 // ---------------------------------------------------------------------------
 
+// The server seats up to MaxPlayers (10) players; never hardcode 6.
+static const int kMaxSeats = 10;
+
 struct Player {
         int seat = -1;
         int stack = 0;
@@ -479,7 +482,7 @@ struct Game {
         int sb = 5, bb = 10, ante = 0;
         int sb_seat = -1, bb_seat = -1;
         int my_seat = -1;
-        Player players[6];
+        Player players[kMaxSeats];
         Card hole[2];
         Card common[5];
         int ncommon = 0;
@@ -516,12 +519,12 @@ parse_game(const nlohmann::json &st, Game &g)
                 g.sb_seat = jval<int>(st["blinds"], "small_seat", -1);
                 g.bb_seat = jval<int>(st["blinds"], "big_seat", -1);
         }
-        for (int i = 0; i < 6; i++) g.players[i] = Player();
+        for (int i = 0; i < kMaxSeats; i++) g.players[i] = Player();
         if (st.contains("players") && st["players"].is_array()) {
                 for (const auto &p : st["players"]) {
                         if (!p.is_object()) continue;
                         int seat = jval<int>(p, "seat", -1);
-                        if (seat < 0 || seat >= 6) continue;
+                        if (seat < 0 || seat >= kMaxSeats) continue;
                         Player &pl = g.players[seat];
                         pl.seat = seat;
                         pl.stack = jval<int>(p, "stack", 0);
@@ -539,7 +542,7 @@ parse_game(const nlohmann::json &st, Game &g)
                 }
         }
         g.live = 0;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < kMaxSeats; i++) {
                 const Player &p = g.players[i];
                 if (!p.busted && p.stack > 0) g.live++;
         }
@@ -548,14 +551,15 @@ parse_game(const nlohmann::json &st, Game &g)
                 // pos = number of live players who act before us, i.e. the
                 // live players from dealer+1 (first to act) up to our seat.
                 int pos = 0;
-                for (int idx = (g.dealer + 1) % 6; idx != g.my_seat; idx = (idx + 1) % 6) {
+                for (int idx = (g.dealer + 1) % kMaxSeats; idx != g.my_seat;
+                     idx = (idx + 1) % kMaxSeats) {
                         const Player &p = g.players[idx];
                         if (!p.busted && p.stack > 0) pos++;
                 }
                 g.my_pos = pos;
         }
         g.opps = 0;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < kMaxSeats; i++) {
                 const Player &p = g.players[i];
                 if (i == g.my_seat) continue;
                 if (!p.busted && p.stack > 0 && !p.folded) g.opps++;
@@ -563,12 +567,12 @@ parse_game(const nlohmann::json &st, Game &g)
         g.hu = (g.live == 2);
         g.in_position = false;
         if (g.my_seat >= 0 && g.live > 1) {
-                int idx = (g.my_seat + 1) % 6;
+                int idx = (g.my_seat + 1) % kMaxSeats;
                 while (idx != g.dealer) {
                         const Player &p = g.players[idx];
                         if (!p.busted && p.stack > 0 && !p.folded && !p.all_in)
                                 g.in_position = true;
-                        idx = (idx + 1) % 6;
+                        idx = (idx + 1) % kMaxSeats;
                 }
         }
         return true;
@@ -593,7 +597,7 @@ static int
 count_limpers(const Game &g, const Player &me)
 {
         int n = 0;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < kMaxSeats; i++) {
                 const Player &p = g.players[i];
                 if (i == g.my_seat || i == g.sb_seat || i == g.bb_seat) continue;
                 if (!p.busted && p.stack > 0 && !p.folded && p.street_bet == g.bb) n++;
@@ -680,7 +684,7 @@ decide_preflop(const Game &g, const Player &me)
 
         // Facing an open raise.
         int raiser_seat = -1, raise_peers = 0;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < kMaxSeats; i++) {
                 const Player &p = g.players[i];
                 if (i == g.my_seat) continue;
                 if (!p.busted && p.stack > 0 && !p.folded && p.street_bet == g.current_bet) {
@@ -698,7 +702,8 @@ decide_preflop(const Game &g, const Player &me)
         }
         int rpos = 0;
         if (raiser_seat >= 0) {
-                for (int idx = (g.dealer + 1) % 6; idx != raiser_seat; idx = (idx + 1) % 6) {
+                for (int idx = (g.dealer + 1) % kMaxSeats; idx != raiser_seat;
+                     idx = (idx + 1) % kMaxSeats) {
                         const Player &p = g.players[idx];
                         if (!p.busted && p.stack > 0) rpos++;
                 }

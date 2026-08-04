@@ -6,8 +6,6 @@
 #include <thread>
 #include <vector>
 
-#include <libwebsockets.h>
-
 // libwebsockets.h pulls in windows.h, whose names clash with raylib's
 // (Rectangle, CloseWindow, ShowCursor, LoadImage, DrawText...). Rename them
 // while windows.h is parsed, like raylib's own rcore_desktop_win32.c does,

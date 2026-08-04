@@ -9,7 +9,7 @@
 
 #include "platform.h"
 
-static int g_failures = 0;
+static std::atomic<int> g_failures = 0;
 
 #define CHECK(cond)                                                       \
         do {                                                              \
@@ -78,7 +78,19 @@ class ScopedServer
         {
                 srv_.table().action_timeout = 0.2;
                 srv_.hand_pause()           = 0.01;
-                th_ = std::thread([this] { srv_.run(); });
+                th_ = std::thread([this] {
+                        try {
+                                srv_.run();
+                        } catch (const std::exception &e) {
+                                printf("FAIL %s: server thread exception: %s\n", __FILE__, e.what());
+                                g_failures++;
+                                srv_.stop();
+                        } catch (...) {
+                                printf("FAIL %s: server thread unknown exception\n", __FILE__);
+                                g_failures++;
+                                srv_.stop();
+                        }
+                });
         }
         Server &srv() { return srv_; }
         ~ScopedServer()
@@ -296,7 +308,9 @@ test_protocol_errors()
                 CHECK(wait_until([&] {
                         for (auto &m : turn->take_messages()) {
                                 if (m.value("type", "") == "reply" && m.value("id", 0) == 7) {
-                                        return m["what"] == "my_cards" &&
+                                        return m.value("what", "") == "my_cards" &&
+                                               m.contains("data") &&
+                                               m["data"].contains("cards") &&
                                                m["data"]["cards"].size() == 2;
                                 }
                         }
@@ -310,7 +324,8 @@ test_protocol_errors()
                 CHECK(wait_until([&] {
                         for (auto &m : turn->take_messages()) {
                                 if (m.value("type", "") == "reply" && m.value("id", 0) == 8) {
-                                        return m["data"].value("type", "") == "state";
+                                        return m.contains("data") &&
+                                               m["data"].value("type", "") == "state";
                                 }
                         }
                         return false;
@@ -852,7 +867,15 @@ static void
 run_test(const char *name, void (*fn)())
 {
         double t0 = Bot::now();
-        fn();
+        try {
+                fn();
+        } catch (const std::exception &e) {
+                printf("FAIL %s: exception: %s\n", name, e.what());
+                g_failures++;
+        } catch (...) {
+                printf("FAIL %s: unknown exception\n", name);
+                g_failures++;
+        }
         printf("  %-24s %.2f s\n", name, Bot::now() - t0);
 }
 
@@ -1047,6 +1070,19 @@ main()
         g_ctx = bot_context();
         CHECK(g_ctx != nullptr);
 
+        // lws_service() blocks for long stretches on a quiet socket (it
+        // ignores its timeout argument), so every pump()/wait_until() below
+        // would stall the moment no message is in flight. A ticker thread
+        // (like the server's own) makes lws_service() return every ~16ms so
+        // the time budgets actually hold.
+        std::atomic<bool> ticker_run{ true };
+        std::thread ticker([&] {
+                while (ticker_run.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                        lws_cancel_service(g_ctx);
+                }
+        });
+
         run_test("join_and_welcome", test_join_and_welcome);
         run_test("protocol_errors", test_protocol_errors);
         run_test("tick_timeout", test_tick_timeout);
@@ -1064,12 +1100,14 @@ main()
         run_test("utf8_name_no_crash", test_utf8_name_no_crash);
         run_test("dos_connection_dropped_on_overflow", test_dos_connection_dropped_on_overflow);
 
+        ticker_run.store(false);
+        ticker.join();
         lws_context_destroy(g_ctx);
 
-        if (g_failures == 0) {
+        if (g_failures.load() == 0) {
                 printf("test_server: all tests passed\n");
                 return 0;
         }
-        printf("test_server: %d test(s) failed\n", g_failures);
+        printf("test_server: %d test(s) failed\n", g_failures.load());
         return 1;
 }

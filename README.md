@@ -55,10 +55,12 @@ the bundled third-party submodules. Linux, macOS and Windows.
 
 ## Getting the source
 
-The third-party libraries are git submodules, so clone recursively:
+The third-party libraries are git submodules, so clone recursively.
+A shallow clone (`--depth 1`) keeps the download small — you don't need
+full history to build:
 
 ```sh
-git clone --recursive <repo-url>
+git clone --recursive --depth 1 <repo-url>
 cd poker
 ```
 
