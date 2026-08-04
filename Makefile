@@ -24,17 +24,19 @@ TEST_POKERSTARS_BIN = test/build/test_pokerstars_export
 
 all: server bot client
 
-# $(PHEVAL_LIB) is built here once, before the parallel sub-makes start:
-# running cmake into the same build dir from several sub-makes at once
-# corrupts the configure (server and bot/titan both depend on it).
-server: $(PHEVAL_LIB)
+# All third-party static libs are built here once, before the parallel
+# sub-makes start: running cmake into the same build dir from several
+# sub-makes at once corrupts the configure (server, bot/titan and client
+# all depend on libpheval.a, server and client on libraylib.a, and every
+# binary on libwebsockets.a).
+server: $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIB)
 	$(MAKE) -C server
 
-bot: $(PHEVAL_LIB)
+bot: $(PHEVAL_LIB) $(LWS_LIB)
 	$(MAKE) -C bot/example
 	$(MAKE) -C bot/titan
 
-client: $(PHEVAL_LIB)
+client: $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIB)
 	$(MAKE) -C client
 
 $(TEST_POKER_BIN): test/build/test_poker.o test/build/poker.o $(PHEVAL_LIB)

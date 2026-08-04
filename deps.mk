@@ -91,17 +91,27 @@ LWS_CMAKE_FLAGS = \
 	-DLWS_WITHOUT_TEST_CLIENT=ON
 
 ifeq ($(RAYLIB_PLATFORM),windows)
-  # MinGW generates MinGW Makefiles by default; force the generator and set
-  # Windows 10 API level for the build (lws calls Windows 10+ APIs on this
-  # platform).
-  LWS_CMAKE_FLAGS += -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00"
+  # MinGW generates MinGW Makefiles by default; force the generator. Do NOT
+  # set -DCMAKE_C_FLAGS here (unlike raylib above): lws already defines
+  # WINVER/_WIN32_WINNT itself (add_definitions in its CMakeLists.txt), so a
+  # second -D on the compile line trips -Werror "redefined" on every TU.
   LWS_CMAKE_GENERATOR = -G "MinGW Makefiles"
+  # lws needs pthreads on this platform: it auto-detects winpthreads in the
+  # MinGW toolchain (LWS_HAVE_PTHREAD_H) but only includes <pthread.h> when
+  # LWS_MAX_SMP > 1 or LWS_WITH_SYS_SMD is on, and it disables both unless
+  # LWS_EXT_PTHREAD_LIBRARIES is given (CMakeLists-implied-options.txt) --
+  # leaving txpacer.c with undeclared pthread_* functions. Point lws at the
+  # toolchain's winpthreads so the include is enabled and the lib is linked.
+  LWS_PTHREAD_ROOT ?= $(shell dirname $(shell dirname $(shell command -v gcc)))
+  LWS_CMAKE_FLAGS += -DLWS_EXT_PTHREAD_INCLUDE_DIR=$(LWS_PTHREAD_ROOT)/include
+  LWS_CMAKE_FLAGS += -DLWS_EXT_PTHREAD_LIBRARIES=$(LWS_PTHREAD_ROOT)/lib/libwinpthread.a
 endif
 
 # lws is linked as a plain static archive, so platform link libs must be
-# supplied at app link time. Windows needs winsock; Linux needs pthreads.
+# supplied at app link time. Windows needs winsock plus winpthreads (lws's
+# txpacer is compiled against it); Linux needs pthreads.
 ifeq ($(RAYLIB_PLATFORM),windows)
-  LWS_LINK_LIBS = -lws2_32 -lcrypt32 -ladvapi32 -luser32
+  LWS_LINK_LIBS = -lws2_32 -lcrypt32 -ladvapi32 -luser32 -lwinpthread
 else ifeq ($(RAYLIB_PLATFORM),macos)
   LWS_LINK_LIBS =
 else
