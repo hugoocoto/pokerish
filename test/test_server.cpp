@@ -168,9 +168,12 @@ current_turn(const std::vector<Bot *> &cs)
 }
 
 // Drive the hand: on your_turn -> check if free, else call. Returns the
-// number of hand_over messages seen.
+// number of hand_over messages seen. If hand_over_dealer is non-null, it is
+// set to the dealer reported by the last hand_over message (the button of
+// the hand that just ended).
 static int
-drive_hand(const std::vector<Bot *> &cs, double seconds, int *hand_over_events)
+drive_hand(const std::vector<Bot *> &cs, double seconds, int *hand_over_events,
+           int *hand_over_dealer = nullptr)
 {
         double end = Bot::now() + seconds;
         int seen   = 0;
@@ -200,6 +203,10 @@ drive_hand(const std::vector<Bot *> &cs, double seconds, int *hand_over_events)
                                         }
                                 } else if (t == "hand_over") {
                                         seen++;
+                                        if (hand_over_dealer && m.contains("state") &&
+                                            m["state"].contains("dealer")) {
+                                                *hand_over_dealer = m["state"].value("dealer", -1);
+                                        }
                                 }
                         }
                 }
@@ -628,15 +635,12 @@ test_hand_flow()
         int hand_overs = 0;
         double end = Bot::now() + 40.0;
         while (Bot::now() < end && hand_overs == 0) {
-                drive_hand(cs, 0.25, &hand_overs);
-                for (Bot *b : cs) {
-                        const nlohmann::json &st = b->last_state();
-                        if (st.contains("dealer")) {
-                                dealer_before = st.value("dealer", -1);
-                        }
-                }
+                // hand_over messages carry the dealer of the hand that just
+                // ended; watch the message stream, not window samples
+                drive_hand(cs, 0.25, &hand_overs, &dealer_before);
         }
         CHECK(hand_overs > 0);
+        CHECK(dealer_before >= 0);
 
         // chips are conserved at the hand boundary (one snapshot: same for all);
         // during the hand-over pause `pot` shows the already-awarded chips, so
@@ -651,14 +655,16 @@ test_hand_flow()
         if (!st.value("hand_over", false)) sum += st.value("pot", 0);
         CHECK_EQ(sum, 6000);
 
-        // the next hand rotates the dealer
-        int dealer_now = dealer_before;
+        // the next hand rotates the dealer: each hand ends with the button
+        // moved exactly one seat clockwise, so the dealer of the next
+        // hand_over must be the previous hand's dealer + 1 (mod 6), no
+        // matter how many hands complete between the two checks
+        int dealer_now = -1;
         end = Bot::now() + 10.0;
-        while (Bot::now() < end && dealer_now == dealer_before) {
-                drive_hand(cs, 0.25, &hand_overs);
-                const nlohmann::json &st2 = cs[0]->last_state();
-                if (st2.contains("dealer")) dealer_now = st2.value("dealer", -1);
+        while (Bot::now() < end && dealer_now < 0) {
+                drive_hand(cs, 0.25, nullptr, &dealer_now);
         }
+        CHECK(dealer_now >= 0);
         CHECK_EQ(dealer_now, (dealer_before + 1) % 6);
 }
 

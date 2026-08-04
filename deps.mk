@@ -49,7 +49,11 @@ else ifeq ($(RAYLIB_PLATFORM),x11)
 else ifeq ($(RAYLIB_PLATFORM),macos)
   RAYLIB_CMAKE_FLAGS = -DPLATFORM=Desktop
 else ifeq ($(RAYLIB_PLATFORM),windows)
-  RAYLIB_CMAKE_FLAGS = -DPLATFORM=Win32
+  # raylib's native Win32 backend calls Windows 10 DPI APIs (GetDpiForWindow,
+  # AdjustWindowRectExForDpi, WM_GETDPISCALEDSIZE); MinGW only declares them
+  # with _WIN32_WINNT/WINVER >= 0x0A00 and defaults lower. Only raylib needs
+  # this: our own code never uses those APIs.
+  RAYLIB_CMAKE_FLAGS = -DPLATFORM=Win32 -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00"
   RAYLIB_CMAKE_GENERATOR = -G "MinGW Makefiles"
 endif
 
