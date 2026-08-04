@@ -168,12 +168,9 @@ current_turn(const std::vector<Bot *> &cs)
 }
 
 // Drive the hand: on your_turn -> check if free, else call. Returns the
-// number of hand_over messages seen. If hand_over_dealer is non-null, it is
-// set to the dealer reported by the last hand_over message (the button of
-// the hand that just ended).
+// number of hand_over messages seen.
 static int
-drive_hand(const std::vector<Bot *> &cs, double seconds, int *hand_over_events,
-           int *hand_over_dealer = nullptr)
+drive_hand(const std::vector<Bot *> &cs, double seconds, int *hand_over_events)
 {
         double end = Bot::now() + seconds;
         int seen   = 0;
@@ -203,10 +200,6 @@ drive_hand(const std::vector<Bot *> &cs, double seconds, int *hand_over_events,
                                         }
                                 } else if (t == "hand_over") {
                                         seen++;
-                                        if (hand_over_dealer && m.contains("state") &&
-                                            m["state"].contains("dealer")) {
-                                                *hand_over_dealer = m["state"].value("dealer", -1);
-                                        }
                                 }
                         }
                 }
@@ -631,16 +624,12 @@ test_hand_flow()
         CHECK(wait_until([&] { return all_seated(cs); }, 10.0));
         CHECK(wait_until([&] { return any_turn(cs); }, 15.0));
 
-        int dealer_before = -1;
         int hand_overs = 0;
         double end = Bot::now() + 40.0;
         while (Bot::now() < end && hand_overs == 0) {
-                // hand_over messages carry the dealer of the hand that just
-                // ended; watch the message stream, not window samples
-                drive_hand(cs, 0.25, &hand_overs, &dealer_before);
+                drive_hand(cs, 0.25, &hand_overs);
         }
         CHECK(hand_overs > 0);
-        CHECK(dealer_before >= 0);
 
         // chips are conserved at the hand boundary (one snapshot: same for all);
         // during the hand-over pause `pot` shows the already-awarded chips, so
@@ -655,17 +644,51 @@ test_hand_flow()
         if (!st.value("hand_over", false)) sum += st.value("pot", 0);
         CHECK_EQ(sum, 6000);
 
-        // the next hand rotates the dealer: each hand ends with the button
-        // moved exactly one seat clockwise, so the dealer of the next
-        // hand_over must be the previous hand's dealer + 1 (mod 6), no
-        // matter how many hands complete between the two checks
-        int dealer_now = -1;
-        end = Bot::now() + 10.0;
-        while (Bot::now() < end && dealer_now < 0) {
-                drive_hand(cs, 0.25, nullptr, &dealer_now);
+        // The button must advance exactly one seat clockwise between
+        // consecutive hands (cash mode never has dead seats). Validate the
+        // hand_over message stream of each bot independently: every bot sees
+        // its own ordered stream, so consecutive messages within it are
+        // consecutive hands no matter how many hands complete per window or
+        // how far apart the bots' streams lag. This catches a genuine
+        // seat-skip while being immune to machine speed.
+        std::vector<int> prev_dealer(cs.size(), -1);
+        std::vector<int> transitions(cs.size(), 0);
+        end = Bot::now() + 15.0;
+        while (Bot::now() < end && transitions[0] < 2) {
+                lws_service(g_ctx, 10);
+                for (size_t i = 0; i < cs.size(); i++) {
+                        for (auto &m : cs[i]->take_messages()) {
+                                std::string t = m.value("type", "");
+                                if (t == "your_turn") {
+                                        const nlohmann::json &bstate = cs[i]->last_state();
+                                        int street = 0;
+                                        if (bstate.contains("players")) {
+                                                for (auto &pl : bstate["players"]) {
+                                                        if (pl.value("seat", -1) == cs[i]->seat()) {
+                                                                street = pl.value("street_bet", 0);
+                                                        }
+                                                }
+                                        }
+                                        if (bstate.value("current_bet", 0) - street <= 0) {
+                                                cs[i]->send_action("check");
+                                        } else {
+                                                cs[i]->send_action("call");
+                                        }
+                                } else if (t == "hand_over") {
+                                        if (!m.contains("state") || !m["state"].contains("dealer")) {
+                                                continue;
+                                        }
+                                        int d = m["state"].value("dealer", -1);
+                                        if (prev_dealer[i] >= 0) {
+                                                CHECK_EQ(d, (prev_dealer[i] + 1) % 6);
+                                        }
+                                        prev_dealer[i] = d;
+                                        transitions[i]++;
+                                }
+                        }
+                }
         }
-        CHECK(dealer_now >= 0);
-        CHECK_EQ(dealer_now, (dealer_before + 1) % 6);
+        CHECK(transitions[0] >= 2);
 }
 
 static void
@@ -1073,6 +1096,11 @@ test_dos_connection_dropped_on_overflow()
 int
 main()
 {
+        // stdout is block-buffered on a pipe: unbuffer it so progress lines
+        // survive a crash (a segfault otherwise eats the whole buffer and
+        // the CI log never shows where it died).
+        setvbuf(stdout, nullptr, _IONBF, 0);
+
         g_ctx = bot_context();
         CHECK(g_ctx != nullptr);
 
