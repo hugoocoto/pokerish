@@ -111,6 +111,17 @@ ifeq ($(RAYLIB_PLATFORM),windows)
   # pulling in the schannel TLS C files, which fail to compile under MinGW
   # GCC's -Werror. Explicitly disable SChannel so the SSL=OFF flag holds.
   LWS_CMAKE_FLAGS += -DLWS_WITH_SCHANNEL=OFF
+  # LWS_WITH_STUB=ON (default) causes implied-options to force LWS_WITH_SPAWN=1,
+  # which includes lib/plat/windows/windows-spawn.c. That file uses
+  # lws_filefd_type (== int on MinGW) where Windows APIs expect HANDLE (void*)
+  # -- a type mismatch that GCC 14 (MSYS2) now promotes to an error. Disable
+  # STUB (and thus SPAWN) so that file is not compiled.
+  LWS_CMAKE_FLAGS += -DLWS_WITH_STUB=OFF
+  # lib/core-net/pollfd.c:437 compares lws_sockfd_type (SOCKET = unsigned long
+  # long on Win64) with int -- a sign-compare that GCC -Werror catches. Pass
+  # -Wno-sign-compare for the lws-only C build so this non-fatal warning does
+  # not abort the compile.
+  LWS_CMAKE_FLAGS += "-DCMAKE_C_FLAGS=-Wno-sign-compare"
 endif
 
 # lws is linked as a plain static archive, so platform link libs must be
