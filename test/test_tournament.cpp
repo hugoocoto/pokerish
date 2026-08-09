@@ -545,8 +545,9 @@ test_heads_up_and_winner()
         CHECK_EQ(bl.first, g_srv->state().dealer); // button = small blind
         CHECK(bl.first != bl.second);
         CHECK(bl.first == a || bl.first == b);
-        CHECK_EQ(g_srv->table().players[bl.first]._street_bet, g_srv->state().small_blind);
-        CHECK_EQ(g_srv->table().players[bl.second]._street_bet, g_srv->state().big_blind);
+        // _street_bet includes the ante (posted before blinds) plus the blind
+        CHECK_EQ(g_srv->table().players[bl.first]._street_bet, g_srv->state().small_blind + g_srv->state().ante);
+        CHECK_EQ(g_srv->table().players[bl.second]._street_bet, g_srv->state().big_blind + g_srv->state().ante);
 
         // hands play out heads-up
         int overs_before = 0;

@@ -105,6 +105,12 @@ ifeq ($(RAYLIB_PLATFORM),windows)
   LWS_PTHREAD_ROOT ?= $(shell dirname $(shell dirname $(shell command -v gcc)))
   LWS_CMAKE_FLAGS += -DLWS_EXT_PTHREAD_INCLUDE_DIR=$(LWS_PTHREAD_ROOT)/include
   LWS_CMAKE_FLAGS += -DLWS_EXT_PTHREAD_LIBRARIES=$(LWS_PTHREAD_ROOT)/lib/libwinpthread.a
+  # On WIN32, LWS defaults LWS_WITH_SCHANNEL=ON (the native TLS backend), and
+  # CMakeLists-implied-options.txt then forces LWS_WITH_SSL=1 whenever
+  # LWS_WITH_SCHANNEL is set -- overriding our -DLWS_WITH_SSL=OFF flag and
+  # pulling in the schannel TLS C files, which fail to compile under MinGW
+  # GCC's -Werror. Explicitly disable SChannel so the SSL=OFF flag holds.
+  LWS_CMAKE_FLAGS += -DLWS_WITH_SCHANNEL=OFF
 endif
 
 # lws is linked as a plain static archive, so platform link libs must be
