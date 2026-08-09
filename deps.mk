@@ -74,7 +74,11 @@ endif
 # --- libwebsockets (vendored, built from source) ---
 LWS_PATH = $(POKER_ROOT)/thirdparty/libwebsockets
 LWS_BUILD = $(LWS_PATH)/build
-LWS_LIB   = $(LWS_BUILD)/lib/libwebsockets.a
+ifeq ($(RAYLIB_PLATFORM),windows)
+  LWS_LIB = $(LWS_BUILD)/lib/libwebsockets_static.a
+else
+  LWS_LIB = $(LWS_BUILD)/lib/libwebsockets.a
+endif
 
 # Minimal ws-only build: no TLS, no extensions, no HTTP/2, no test apps.
 LWS_CMAKE_FLAGS = \

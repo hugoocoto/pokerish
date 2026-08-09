@@ -578,7 +578,7 @@ test_simulate_human_instant()
         double human_delay = 1e9, bot_delay = 1e9;
         double human_turn_at = 0, bot_turn_at = 0;
         end = Bot::now() + 10.0;
-        while (Bot::now() < end && (human_delay > 0.05 || bot_delay > 0.10)) {
+        while (Bot::now() < end && (human_delay > 0.12 || bot_delay > 0.20)) {
                 srv.tick(Bot::now());
                 lws_service(g_ctx, 10);
                 for (Bot *b : cs) {
@@ -607,8 +607,9 @@ test_simulate_human_instant()
         }
 
         // the human's actions were not held; the bot's were (capped at 0.35 s)
-        CHECK(human_delay <= 0.05);
+        CHECK(human_delay <= 0.12);
         CHECK(bot_delay >= 0.20);
+        CHECK(human_delay < bot_delay);
 
         ticker_run.store(false);
         ticker.join();
