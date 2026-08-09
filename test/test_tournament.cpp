@@ -419,21 +419,33 @@ test_elimination_no_rebuy()
         CHECK(wait_until([&] { return g_srv->table().players[victim].busted; }, 10.0));
         CHECK_EQ(g_srv->table().players[victim].stack, 0);
         CHECK_EQ(g_srv->table().alive_count(), 5);
-        CHECK(wait_until([&] {
-                return g_clients[1]->last_state().value("players_alive", 0) == 5;
-        }, 15.0));
+        // the player_out broadcast itself carries the matching snapshot: wait on
+        // the message (g_msgs), not on one client's state_ (which client owns
+        // which seat is a connection race, and a client's snapshot only
+        // refreshes on state-bearing messages)
         bool out_event = false;
-        CHECK(wait_until([&] {
+        bool alive_ok  = wait_until([&] {
                 for (auto &m : g_msgs) {
                         if (m.value("type", "") == "player_out" &&
                             m.value("seat", -1) == victim &&
                             m.value("reason", "") == "busted") {
                                 out_event = true;
-                                return true;
+                                return m["state"].value("players_alive", 0) == 5;
                         }
                 }
                 return false;
-        }, 5.0));
+        }, 15.0);
+        if (!alive_ok) {
+                // diagnostics for the CI flake: which client owns which seat,
+                // and what snapshot each still holds
+                for (size_t i = 0; i < g_clients.size(); i++) {
+                        Bot *b = g_clients[i];
+                        printf("  [diag] client[%zu] \"%s\" seat=%d connected=%d alive=%d\n",
+                               i, b->name().c_str(), b->seat(), b->connected() ? 1 : 0,
+                               b->last_state().value("players_alive", -1));
+                }
+        }
+        CHECK(alive_ok);
         CHECK(out_event);
 
         // the client is disconnected and the seat never gets a bot
