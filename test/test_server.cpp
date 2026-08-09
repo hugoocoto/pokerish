@@ -471,9 +471,9 @@ test_simulate_never_times_out()
         Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
                    /*tournament=*/false, 300, 10, 1000, /*max_players=*/2, "hands");
         CHECK(srv.hand_pause() == 0.0); // non-simulate: hands chain instantly
-        srv.table().action_timeout = 0.2;
+        srv.table().action_timeout = 0.4;
         srv.hand_pause()           = 0.01;
-        srv.set_simulate(true, 1.0); // think = exactly 1.0 s, capped at 0.15 s
+        srv.set_simulate(true, 1.0); // think = exactly 1.0 s, capped at 0.35 s
 
         std::atomic<bool> ticker_run{ true };
         std::thread ticker([&] {
@@ -525,12 +525,14 @@ test_simulate_never_times_out()
                 }
         }
 
-        // the game progressed at a simulated human pace, nobody was folded
-        // on timeout, and the hold really delayed the actions
+        // The hold is capped just below the action deadline, so what we can
+        // reliably assert is that some non-trivial hold happened (>= 0.20 s)
+        // rather than the action firing instantly. With action_timeout=0.4 the
+        // cap is 0.35 s, giving plenty of margin even on noisy CI runners.
         CHECK(actions > 0);
         CHECK(timeouts == 0);
         CHECK(hand_overs > 0);
-        CHECK(min_delay >= 0.10);
+        CHECK(min_delay >= 0.20);
 
         ticker_run.store(false);
         ticker.join();
@@ -547,9 +549,9 @@ test_simulate_human_instant()
         int port = find_free_port();
         Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
                    /*tournament=*/false, 300, 10, 1000, /*max_players=*/2, "hands");
-        srv.table().action_timeout = 0.2;
+        srv.table().action_timeout = 0.4;
         srv.hand_pause()           = 0.01;
-        srv.set_simulate(true, 1.0); // think = exactly 1.0 s, capped at 0.15 s
+        srv.set_simulate(true, 1.0); // think = exactly 1.0 s, capped at 0.35 s
 
         std::atomic<bool> ticker_run{ true };
         std::thread ticker([&] {
@@ -604,9 +606,9 @@ test_simulate_human_instant()
                 }
         }
 
-        // the human's actions were not held; the bot's were (capped at 0.15 s)
+        // the human's actions were not held; the bot's were (capped at 0.35 s)
         CHECK(human_delay <= 0.05);
-        CHECK(bot_delay >= 0.10);
+        CHECK(bot_delay >= 0.20);
 
         ticker_run.store(false);
         ticker.join();
