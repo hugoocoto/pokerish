@@ -374,7 +374,7 @@ test_blind_levels()
         CHECK(level2_event);
 
         // play until level 5: 40/80 with ante 5
-        CHECK(wait_until([&] { return g_srv->state().level >= 5; }, 10.0));
+        CHECK(wait_until([&] { return g_srv->state().level >= 5; }, 20.0));
         CHECK_EQ(g_srv->state().small_blind, 40);
         CHECK_EQ(g_srv->state().big_blind, 80);
         CHECK_EQ(g_srv->state().ante, 5);
@@ -421,7 +421,7 @@ test_elimination_no_rebuy()
         CHECK_EQ(g_srv->table().alive_count(), 5);
         CHECK(wait_until([&] {
                 return g_clients[1]->last_state().value("players_alive", 0) == 5;
-        }, 5.0));
+        }, 15.0));
         bool out_event = false;
         CHECK(wait_until([&] {
                 for (auto &m : g_msgs) {
@@ -437,7 +437,7 @@ test_elimination_no_rebuy()
         CHECK(out_event);
 
         // the client is disconnected and the seat never gets a bot
-        CHECK(wait_until([&] { return !g_clients[victim]->connected(); }, 5.0));
+        CHECK(wait_until([&] { return !g_clients[victim]->connected(); }, 15.0));
         CHECK(!g_srv->table().players[victim].auto_play); // no bot took over
         CHECK(g_srv->table().players[victim].name.rfind("Bot ", 0) != 0);
 

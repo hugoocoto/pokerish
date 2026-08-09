@@ -130,7 +130,7 @@ endif
 # supplied at app link time. Windows needs winsock plus winpthreads (lws's
 # txpacer is compiled against it); Linux needs pthreads.
 ifeq ($(RAYLIB_PLATFORM),windows)
-  LWS_LINK_LIBS = -lws2_32 -lcrypt32 -ladvapi32 -luser32 -lwinpthread
+  LWS_LINK_LIBS = -lws2_32 -liphlpapi -lcrypt32 -ladvapi32 -luser32 -lwinpthread
 else ifeq ($(RAYLIB_PLATFORM),macos)
   LWS_LINK_LIBS =
 else
