@@ -117,11 +117,9 @@ ifeq ($(RAYLIB_PLATFORM),windows)
   # -- a type mismatch that GCC 14 (MSYS2) now promotes to an error. Disable
   # STUB (and thus SPAWN) so that file is not compiled.
   LWS_CMAKE_FLAGS += -DLWS_WITH_STUB=OFF
-  # lib/core-net/pollfd.c:437 compares lws_sockfd_type (SOCKET = unsigned long
-  # long on Win64) with int -- a sign-compare that GCC -Werror catches. Pass
-  # -Wno-sign-compare for the lws-only C build so this non-fatal warning does
-  # not abort the compile.
-  LWS_CMAKE_FLAGS += "-DCMAKE_C_FLAGS=-Wno-sign-compare"
+  # Disable -Werror for libwebsockets so GCC 14 toolchain warnings (e.g. sign comparison in pollfd.c)
+  # do not break the build on MinGW/Windows.
+  LWS_CMAKE_FLAGS += -DDISABLE_WERROR=ON
 endif
 
 # lws is linked as a plain static archive, so platform link libs must be
