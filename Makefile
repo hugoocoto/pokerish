@@ -35,6 +35,7 @@ server: $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIB)
 bot: $(PHEVAL_LIB) $(LWS_LIB)
 	$(MAKE) -C bot/example
 	$(MAKE) -C bot/titan
+	$(MAKE) -C bot/prometheus
 
 client: $(PHEVAL_LIB) $(RAYLIB_LIB) $(LWS_LIB)
 	$(MAKE) -C client
@@ -86,7 +87,7 @@ test: $(TEST_POKER_BIN) $(TEST_PROTO_BIN) $(TEST_SERVER_BIN) $(TEST_TOURNAMENT_B
 	./$(TEST_POKERSTARS_BIN)
 
 clean:
-	rm -rf server/build bot/example/build bot/titan/build client/build test/build
+	rm -rf server/build bot/example/build bot/titan/build bot/prometheus/build client/build test/build
 
 distclean: clean
 	rm -rf $(PHEVAL_PATH) $(POKER_ROOT)/thirdparty/raylib/build* $(LWS_BUILD)

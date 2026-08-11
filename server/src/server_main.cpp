@@ -26,8 +26,7 @@ draw_card(const phevaluator::Card &pc, int x, int y)
 }
 
 static void
-draw_player_bet(const Table &table, size_t idx, int x, int y, int screen_h,
-                const std::string &waiting_name)
+draw_player_bet(const Table &table, size_t idx, int x, int y)
 {
         const Player &p = table.players[idx];
         if (p.busted) return;
@@ -37,16 +36,11 @@ draw_player_bet(const Table &table, size_t idx, int x, int y, int screen_h,
         char buf[64] = { 0 };
         snprintf(buf, sizeof(buf) - 1, "Bet: %d", p._bet);
         int tx = x + cw - MeasureText(buf, sc(20)) / 2;
-        int by;
-        if (y > screen_h / 2) {
-                // bottom half: just above the name (one more line up when
-                // the "Waiting:" label occupies that spot)
-                by = waiting_name.empty() ? y - sc(48) : y - sc(68);
-        } else {
-                // top half: just below the chips line
-                by = y + ch + sc(4) + sc(20) + sc(4);
-        }
+        // Chips line sits at y + ch + sc(4) + sc(20); place the bet label
+        // one full line (sc(20)) below that so it never overlaps the chips.
+        int by = y + ch + sc(4) + sc(20) + sc(4) + sc(20);
         DrawText(buf, tx, by, sc(20), ORANGE);
+
 }
 
 static void
@@ -252,8 +246,7 @@ draw_table(const Table &table, const Game_State &state, int w, int h, double now
         // bets are drawn after the board so the ones that land on its edge
         // (center-column seats) stay visible instead of being covered
         for (size_t i = 0; i < table.players.size(); i++) {
-                draw_player_bet(table, i, px[i], py[i], h,
-                                i < waiting.size() ? waiting[i] : std::string());
+                draw_player_bet(table, i, px[i], py[i]);
         }
 
         // tournament HUD: level, time left in the level, blinds, players left

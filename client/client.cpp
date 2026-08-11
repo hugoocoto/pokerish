@@ -312,7 +312,7 @@ update_turn_state(ClientData &cd)
 
 
 static void
-draw_player_bet(const nlohmann::json &pl, int x, int y, int screen_h)
+draw_player_bet(const nlohmann::json &pl, int x, int y)
 {
         const int cw = sc((int) default_card_size.width);
         const int ch = sc((int) default_card_size.height);
@@ -321,14 +321,9 @@ draw_player_bet(const nlohmann::json &pl, int x, int y, int screen_h)
         char buf[64] = { 0 };
         snprintf(buf, sizeof(buf) - 1, "Bet: %d", jval<int>(pl, "bet", 0));
         int tx = x + cw - MeasureText(buf, sc(20)) / 2;
-        int by;
-        if (y > screen_h / 2) {
-                // bottom half: just above the name
-                by = y - sc(48);
-        } else {
-                // top half: just below the chips line
-                by = y + ch + sc(4) + sc(20) + sc(4);
-        }
+        // Chips line sits at y + ch + sc(4) + sc(20); place the bet label
+        // one full line (sc(20)) below that so it never overlaps the chips.
+        int by = y + ch + sc(4) + sc(20) + sc(4) + sc(20);
         DrawText(buf, tx, by, sc(20), ORANGE);
 }
 
@@ -839,7 +834,7 @@ draw_table(ClientData &cd, int w, int h)
                 for (const auto &pl : state["players"]) {
                         int seat = jval<int>(pl, "seat", -1);
                         if (seat < 0 || seat >= N) continue;
-                        draw_player_bet(pl, sx[seat], sy[seat], ih);
+                        draw_player_bet(pl, sx[seat], sy[seat]);
                 }
         }
 
