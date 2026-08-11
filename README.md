@@ -43,7 +43,7 @@ the bundled third-party submodules. Linux, macOS and Windows.
 | Path | Contents |
 |------|----------|
 | `server/` | The whole game: engine (`src/poker.{h,cpp}`), protocol (`src/proto.{h,cpp}`), WebSocket server (`src/server.{h,cpp}`), tournament logic, hand-history export, raylib GUI entry point (`src/server_main.cpp`). |
-| `bot/` | Independent clients: `example/` (minimal C++ bot), `titan/` (stronger strategy bot), `python/` (Python version of the example bot). |
+| `bot/` | Independent clients: `example/` (minimal C++ bot), `titan/` (stronger strategy bot), `python/` (Python version of the example bot), `prometheus/` (elite GTO bot — see its [README](bot/prometheus/README.md)). |
 | `client/` | raylib GUI play client for a human (Fold/Call/Raise buttons, own cards face up). |
 | `test/` | Unit tests, one binary per suite (see [Testing](#testing)). |
 | `ci/` | `smoke_game.sh`: live headless game (real server + bot over WebSocket). |
@@ -51,7 +51,7 @@ the bundled third-party submodules. Linux, macOS and Windows.
 | `hands/` | PokerStars-format hand history exports. |
 | `thirdparty/` | Git submodules: `PokerHandEvaluator` (hand strength), `raylib` (GUI), `nlohmann` (JSON). |
 | `Makefile`, `deps.mk` | Umbrella build + shared rules for the submodule libraries. |
-| `run_fast.sh`, `run_tournament.sh` | One-shot scripts that build, start a server, spawn bots and launch the GUI client. |
+| `scripts/` | One-shot scripts (`run_fast.sh`, `run_tournament.sh`, `run_bot_tournament.sh`) that build, start a server, spawn bots and launch the GUI client. |
 
 ## Getting the source
 
@@ -98,6 +98,7 @@ This produces:
 - `server/build/server` — the game server (+ GUI)
 - `bot/example/build/example_bot` — minimal C++ bot
 - `bot/titan/build/titan` — stronger strategy bot
+- `bot/prometheus/build/prometheus` — elite GTO bot (opponent modeling, Nash push/fold)
 - `client/build/client` — raylib human play client
 
 The first build compiles the third-party submodules via cmake; raylib takes a
@@ -111,7 +112,7 @@ Useful targets:
 | Target | What it builds |
 |--------|----------------|
 | `make server` | `server/build/server` only |
-| `make bot` | `bot/example` + `bot/titan` |
+| `make bot` | `bot/example` + `bot/titan` + `bot/prometheus` |
 | `make client` | `client/build/client` only |
 | `make test` | builds and runs the test binaries (see [Testing](#testing)) |
 | `make clean` | removes the build directories |
@@ -142,6 +143,7 @@ Connect players:
 ./client/build/client                 # human play client (GUI)
 ./bot/example/build/example_bot       # example bot
 ./bot/titan/build/titan               # stronger bot
+./bot/prometheus/build/prometheus     # elite bot (see bot/prometheus/README.md)
 bot/python/venv/bin/python bot/python/bot.py   # Python bot (deps in bot/python/venv)
 ```
 
@@ -154,10 +156,13 @@ bot/python/venv/bin/python bot/python/bot.py   # Python bot (deps in bot/python/
 
 ### One-shot scripts
 
-- `./run_fast.sh [N]` — builds everything, starts a headless cash server (N
+- `scripts/run_fast.sh [N]` — builds everything, starts a headless cash server (N
   seats, `--simulate`), spawns N-1 bots and launches the human GUI client.
-- `./run_tournament.sh` — same, but a 6-player tournament with 1 Titan +
+- `scripts/run_tournament.sh [N]` — same, but a 6-player tournament with 1 Titan +
   2 C++ + 2 Python bots and your play client in the foreground.
+- `scripts/run_bot_tournament.sh` — 4-seat tournament with the GUI server and one
+  of each bot (Prometheus, Titan, C++ example bot, Python bot); options
+  `--port N --level-seconds N --token SECRET --no-simulate`.
 
 See [HOW_TO_HOST.md](HOW_TO_HOST.md) for the complete flag reference, both
 game modes, and more examples.

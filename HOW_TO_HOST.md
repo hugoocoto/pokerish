@@ -143,6 +143,8 @@ joins are accepted.
 ./server/build/server --headless --tournament --tournament-end exit
 ```
 
-`./run_tournament.sh` does all of this for you: builds everything, starts a
+`scripts/run_tournament.sh` does all of this for you: builds everything, starts a
 6-player tournament server in the background, launches 1 Titan + 2 C++ + 2
-Python bots, and connects your human play client in the foreground.
+Python bots, and connects your human play client in the foreground. A bot-only
+variant is `scripts/run_bot_tournament.sh` (4-seat tournament, one of each bot,
+no human client).
