@@ -96,10 +96,12 @@ venv/bin/pip install -r requirements.txt
 venv/bin/python bot.py --host 127.0.0.1 --port 9000 --name Nemesis [--token SECRET] [-v]
 ```
 
-Or use the convenience script (builds everything, spins up a headless
-tournament with Prometheus + Titan + Nemesis, tails the Nemesis log):
+Or use the convenience scripts (build everything, spin up a tournament that
+includes Nemesis — watch it on the GUI server, or play yourself via the
+headless variant):
 
 ```bash
-scripts/run_nemesis_tournament.sh [N] [--port PORT] [--level-seconds SECS]
+scripts/run_tournament.sh [N]        # GUI server, bot-only, spectate
+scripts/run_headless.sh [N]          # headless server + your GUI client
 ```
 

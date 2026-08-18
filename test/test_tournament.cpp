@@ -69,6 +69,8 @@ static std::vector<nlohmann::json> g_msgs;
 // chips destroyed by bust_seat() (zeroing a stack outside a pot): the engine
 // itself conserves chips, so winner checks subtract this test-side loss
 static int g_destroyed = 0;
+// when >= 0, this seat folds instead of checking/calling (fold-pots test)
+static int g_fold_seat = -1;
 
 static void
 respond(Bot *b)
@@ -77,6 +79,10 @@ respond(Bot *b)
                 g_msgs.push_back(m);
                 std::string t = m.value("type", "");
                 if (t == "your_turn") {
+                        if (b->seat() == g_fold_seat) {
+                                b->send_action("fold");
+                                continue;
+                        }
                         // act instantly: check when free, else call
                         const nlohmann::json &st = b->last_state();
                         int street              = 0;
@@ -826,6 +832,86 @@ test_no_duplicate_player_out()
         srv.stop();
 }
 
+// Regression: a busted (eliminated) seat must never win a pot by fold. The
+// engine used to reset _fold = false for every player in end_hand() and then
+// skip busted seats, leaving them permanently "not folded"; finish_hand()
+// picked the first non-folded seat as the survivor, so with seat 0 dead every
+// fold-won pot went to the ghost and the eliminated stack "resurrected".
+static void
+test_busted_seat_never_wins_fold_pot()
+{
+        int port = find_free_port();
+        Server srv(port, "127.0.0.1", nullptr, /*verbose=*/false,
+                   /*tournament=*/true, /*level_seconds=*/2, /*countdown=*/0.5,
+                   /*start_stack=*/1000, /*max_players=*/3);
+        srv.table().action_timeout = 1e9;
+        srv.hand_pause()           = 0.1;
+        g_destroyed                = 0;
+        g_srv = &srv;
+        g_clients = make_clients(port, 3);
+        CHECK(wait_until([&] { return all_seated(g_clients); }, 10.0));
+        CHECK(wait_until([&] { return g_srv->state().tournament_status == T_RUNNING; }, 10.0));
+
+        // eliminate seat 0: the lowest index, so a ghost there would be
+        // picked first by the survivor scan
+        bust_seat(0);
+        CHECK(wait_until([&] { return g_srv->table().players[0].busted; }, 10.0));
+        CHECK_EQ(g_srv->table().players[0].stack, 0);
+        g_fold_seat = g_clients[1]->seat();
+
+        // every hand now ends by fold: two players, one always folds
+        CHECK(wait_until([&] {
+                for (auto &m : g_msgs) {
+                        if (m.value("type", "") != "hand_over") continue;
+                        std::string r = m.value("result", "");
+                        if (r.find("(fold)") == std::string::npos) continue;
+                        // the recorded winner must be a live player, never
+                        // the busted seat's ghost
+                        if (r.rfind(g_srv->table().players[0].name, 0) == 0) return false;
+                        return true;
+                }
+                return false;
+        }, 20.0));
+        CHECK_EQ(g_srv->table().players[0].stack, 0);
+        CHECK(g_srv->table().players[0].busted);
+
+        // a few more fold hands: the ghost stack must stay at zero
+        int folds = 1;
+        CHECK(wait_until([&] {
+                folds = 0;
+                for (auto &m : g_msgs) {
+                        if (m.value("type", "") != "hand_over") continue;
+                        std::string r = m.value("result", "");
+                        if (r.find("(fold)") == std::string::npos) continue;
+                        folds++;
+                        if (r.rfind(g_srv->table().players[0].name, 0) == 0) return false;
+                }
+                return folds >= 4;
+        }, 30.0));
+        g_fold_seat = -1;
+        CHECK_EQ(g_srv->table().players[0].stack, 0);
+        CHECK(g_srv->table().players[0].busted);
+
+        // eliminate the folder too: the remaining player must win the whole
+        // tournament (the ghost gets nothing)
+        bust_seat(g_clients[1]->seat());
+        CHECK(wait_until([&] { return g_srv->state().tournament_status == T_FINISHED; }, 10.0));
+        CHECK_EQ(g_srv->table().players[0].stack, 0);
+        CHECK(wait_until([&] { return seen("tournament_over"); }, 5.0));
+        for (auto &m : g_msgs) {
+                if (m.value("type", "") == "tournament_over") {
+                        CHECK(m["winner"].value("seat", -1) != 0);
+                        CHECK(m["winner"].value("seat", -1) >= 0);
+                        CHECK_EQ(m.value("award", 0), 3 * StartStack - g_destroyed);
+                }
+        }
+
+        for (Bot *b : g_clients) delete b;
+        g_clients.clear();
+        g_msgs.clear();
+        srv.stop();
+}
+
 int
 main()
 {
@@ -852,6 +938,7 @@ main()
         run_test("tournament_end_modes", test_tournament_end_modes);
         run_test("ten_player_tournament", test_ten_player_tournament);
         run_test("no_duplicate_player_out", test_no_duplicate_player_out);
+        run_test("busted_seat_never_wins_fold_pot", test_busted_seat_never_wins_fold_pot);
 
         ticker_run.store(false);
         ticker.join();

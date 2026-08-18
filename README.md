@@ -51,7 +51,7 @@ the bundled third-party submodules. Linux, macOS and Windows.
 | `hands/` | PokerStars-format hand history exports. |
 | `thirdparty/` | Git submodules: `PokerHandEvaluator` (hand strength), `raylib` (GUI), `nlohmann` (JSON). |
 | `Makefile`, `deps.mk` | Umbrella build + shared rules for the submodule libraries. |
-| `scripts/` | One-shot scripts (`run_fast.sh`, `run_tournament.sh`, `run_bot_tournament.sh`) that build, start a server, spawn bots and launch the GUI client. |
+| `scripts/` | One-shot scripts (`run_tournament.sh`, `run_headless.sh`) that build, start a tournament server, spawn all the bots and optionally launch the GUI client. |
 
 ## Getting the source
 
@@ -156,13 +156,14 @@ bot/python/venv/bin/python bot/python/bot.py   # Python bot (deps in bot/python/
 
 ### One-shot scripts
 
-- `scripts/run_fast.sh [N]` — builds everything, starts a headless cash server (N
-  seats, `--simulate`), spawns N-1 bots and launches the human GUI client.
-- `scripts/run_tournament.sh [N]` — same, but a 6-player tournament with 1 Titan +
-  2 C++ + 2 Python bots and your play client in the foreground.
-- `scripts/run_bot_tournament.sh` — 4-seat tournament with the GUI server and one
-  of each bot (Prometheus, Titan, C++ example bot, Python bot); options
-  `--port N --level-seconds N --token SECRET --no-simulate`.
+- `scripts/run_tournament.sh [N]` — bot-only tournament on the GUI server: every
+  bot (Prometheus, Titan, Nemesis, Python, C++ fillers) fills N seats and you
+  watch the server window.
+- `scripts/run_headless.sh [N]` — headless tournament server with all the bots in
+  the background and your human GUI client on the last seat.
+
+Both take `--port N --level-seconds N --token SECRET --no-simulate` (N = seats,
+2-10, default 6).
 
 See [HOW_TO_HOST.md](HOW_TO_HOST.md) for the complete flag reference, both
 game modes, and more examples.
