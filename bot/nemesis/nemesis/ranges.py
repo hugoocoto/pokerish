@@ -169,9 +169,11 @@ def threebet_value_range(position: str) -> set[str]:
     return top_pct(4.0 if position in ("UTG", "UTG1", "MP1") else 6.0)
 
 
-def call_open_range(position: str, opener_position_idx: int, my_position_idx: int) -> set[str]:
+def call_open_range(position: str, opener_position_idx: int, my_position_idx: int,
+                    extra_pct: float = 0.0) -> set[str]:
     """Flat-calling range vs. a single open, position aware: wider in position,
-    tighter out of position."""
+    tighter out of position. `extra_pct` widens the range (used when the opener
+    is fingerprinted as position-blind / wider than their seat implies)."""
     ip = my_position_idx > opener_position_idx  # True = we're closing action / in position
     pct = 16.0 if ip else 9.0
-    return top_pct(pct)
+    return top_pct(min(100.0, pct + extra_pct))

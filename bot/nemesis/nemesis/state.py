@@ -15,6 +15,7 @@ class PlayerState:
     all_in: bool = False
     busted: bool = False
     is_turn: bool = False
+    last_action: dict = None  # {"type": "bet"|"call"|"fold"|"check"|"none", "amount": int}
 
 
 class GameState:
@@ -53,6 +54,7 @@ class GameState:
                 folded=p.get("folded", False), has_acted=p.get("has_acted", False),
                 all_in=p.get("all_in", False), busted=p.get("busted", False),
                 is_turn=p.get("is_turn", False),
+                last_action=p.get("last_action", None),
             )
 
     # -- derived helpers -----------------------------------------------
