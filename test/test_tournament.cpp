@@ -448,10 +448,33 @@ test_elimination_no_rebuy()
         CHECK(alive_ok);
         CHECK(out_event);
 
-        // the client is disconnected and the seat never gets a bot
-        CHECK(wait_until([&] { return !g_clients[victim]->connected(); }, 15.0));
+        // the seat never gets a bot: tournament seats stay dead. Assert this
+        // before the client-close wait below so a slow CI host cannot skip it.
         CHECK(!g_srv->table().players[victim].auto_play); // no bot took over
         CHECK(g_srv->table().players[victim].name.rfind("Bot ", 0) != 0);
+
+        // the busted client is disconnected. The server kills the session
+        // with LWS_TO_KILL_ASYNC at round end, but the client only notices a
+        // frame later (lws_service round) — under heavy CI load the close can
+        // lag far behind the kill and outrun any small timeout, so wait long.
+        bool client_dropped = wait_until([&] {
+                return !g_clients[victim]->connected();
+        }, 30.0);
+        if (!client_dropped) {
+                // diagnostics for the CI flake: the victim's server-side state
+                // and what each remaining client believes about itself
+                printf("  [diag] victim seat=%d busted=%d auto_play=%d stack=%d\n",
+                       victim, g_srv->table().players[victim].busted ? 1 : 0,
+                       g_srv->table().players[victim].auto_play ? 1 : 0,
+                       g_srv->table().players[victim].stack);
+                for (size_t i = 0; i < g_clients.size(); i++) {
+                        Bot *b = g_clients[i];
+                        printf("  [diag] client[%zu] \"%s\" seat=%d connected=%d\n",
+                               i, b->name().c_str(), b->seat(),
+                               b->connected() ? 1 : 0);
+                }
+        }
+        CHECK(client_dropped);
 
         // play on with 5 players: hands still complete, the seat stays out
         CHECK(wait_until([&] {
