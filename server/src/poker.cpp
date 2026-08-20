@@ -301,7 +301,12 @@ Table::end_hand(Game_State *state)
                 p.last_action = {};
                 p.hand.reset();
                 p.set_rank(phevaluator::Rank(0));
-                if (p.busted) continue; // dead seat: stays out
+                if (p.busted) {
+                        // dead seat: stays out, and stays folded so the
+                        // finish_hand survivor scan can never pick it
+                        p._fold = true;
+                        continue;
+                }
                 if (p.stack <= 0) {
                         if (state->tournament) {
                                 p.busted = true; // eliminated, no rebuy
@@ -541,7 +546,7 @@ Table::finish_hand(Game_State *state)
 
         int survivor = -1;
         for (size_t i = 0; i < this->players.size(); i++) {
-                if (!this->players[i]._fold) {
+                if (!this->players[i].busted && !this->players[i]._fold) {
                         survivor = (int) i;
                         break;
                 }
@@ -634,13 +639,15 @@ Table::award_pots(int dealer)
                 std::vector<int> eligible;
                 for (size_t i = 0; i < this->players.size(); i++) {
                         const Player &p = this->players[i];
-                        if (!p._fold && p._bet >= v) eligible.push_back((int) i);
+                        if (!p.busted && !p._fold && p._bet >= v) eligible.push_back((int) i);
                 }
                 if (eligible.empty()) {
                         // dead money: only folded players covered this layer;
                         // award it to the best hand among the survivors
                         for (size_t i = 0; i < this->players.size(); i++) {
-                                if (!this->players[i]._fold) eligible.push_back((int) i);
+                                if (!this->players[i].busted && !this->players[i]._fold) {
+                                        eligible.push_back((int) i);
+                                }
                         }
                 }
                 if (eligible.empty()) {

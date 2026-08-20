@@ -495,6 +495,28 @@ struct PreflopStrategy {
 static PreflopStrategy g_pre;
 static bool g_pre_init = false;
 
+// Precomputed preflop HU equity for all 169 hand classes (pairs 0-12,
+// suited 13-90, offsuit 91-168). Filled once by build_pf_eq_table() so
+// call-shove decisions can use real equity instead of range tables.
+static double g_pf_eq[169] = {};
+
+static void build_pf_eq_table() {
+    // pairs: index = rank (0=22 .. 12=AA)
+    for (int r = 0; r < 13; r++) {
+        Card h[2] = {Card(r * 4), Card(r * 4 + 1)};
+        g_pf_eq[r] = equity_hu(h, nullptr, 0);
+    }
+    // suited and offsuit non-pair hands; r1 > r2 always
+    for (int r1 = 1; r1 < 13; r1++) {
+        for (int r2 = 0; r2 < r1; r2++) {
+            Card hs[2] = {Card(r1 * 4),     Card(r2 * 4)    }; // same suit (0)
+            Card ho[2] = {Card(r1 * 4),     Card(r2 * 4 + 1)}; // diff suit
+            g_pf_eq[hand_index(r1, r2, true)]  = equity_hu(hs, nullptr, 0);
+            g_pf_eq[hand_index(r1, r2, false)] = equity_hu(ho, nullptr, 0);
+        }
+    }
+}
+
 static void init_preflop() {
     if (g_pre_init) return;
     g_pre_init = true;
@@ -596,6 +618,10 @@ static void init_preflop() {
     g_pre.sb_open     = g_pre.open_sb;
     g_pre.sb_call_bb  = make_range("22+,A2s+,K5s+,Q8s+,J8s+,T8s+,97s+,87s,A8o+,K9o+,QTo+,JTo");
     g_pre.bb_raise_limp = make_range("22+,A2s+,K8s+,Q9s+,J9s+,T9s,98s,ATo+,KJo+");
+
+    // Build the HU-equity table last (1500 MC samples × 169 hand classes;
+    // fast in C++ – a few hundred ms – but must come after ranges are set).
+    build_pf_eq_table();
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +650,37 @@ struct PreflopContext {
     Card hole[2];
     // Opponent model of the raiser
     const OppModel *raiser_model;
+
+    // --- ICM / tournament context (fixes: "ICM awareness" was a comment
+    //     with no code behind it) ---
+    bool is_tournament;
+    double icm_win_share;     // our share of chips in play, ~= P(finish 1st)
+                               // in this server's winner-take-all format
+    double icm_risk_premium;  // 0..~3 "risk units"; higher => tighten
+                               // marginal calls/shoves against short stacks
+                               // when we're already the chip leader
 };
+
+// ICM: pokerish tournaments are winner-take-all (see API.md), so a player's
+// tournament equity collapses to their probability of finishing first,
+// approximated by their share of total chips in play.
+static double icm_win_probability(int my_stack, const int *stacks, int n) {
+    long total = 0;
+    for (int i = 0; i < n; i++) total += stacks[i];
+    if (total <= 0) return 0.0;
+    return (double)my_stack / (double)total;
+}
+
+// Risk premium: discourage marginal, high-variance spots for a dominant
+// chip leader against a much shorter stack (busting them barely moves our
+// win probability, so it's a bad risk/reward trade even chip-EV positive).
+static double icm_risk_premium(double my_share, double opp_share, int players_left) {
+    double premium = 0.0;
+    if (my_share > 0.30 && opp_share < my_share * 0.5) premium += 1.5;
+    if (players_left <= 4) premium += 1.0;
+    if (players_left <= 2) premium -= 1.5; // HU: chip EV ~= tournament EV
+    return premium < 0.0 ? 0.0 : premium;
+}
 
 struct Decision {
     const char *act; // "fold","check","call","call_all","bet"
@@ -649,33 +705,84 @@ static Decision decide_preflop_full(const PreflopContext &ctx) {
 
     // ─── Short stack push/fold ─────────────────────────────────────────────
     if (sbb <= 20) {
-        int push_bb = (int)std::min(20.0, sbb);
+        // Position-aware effective-stack adjustment (fixes leak #1: ranges
+        // used to be indexed by depth ONLY, identical from every seat).
+        // Later position => more fold equity / less info => can profitably
+        // push a range that "belongs" to a slightly deeper stack. Earlier
+        // position => opposite. SB open-shoving only faces the BB, so it
+        // gets the same treatment as a late-position seat.
+        int pos_adj = 0;
+        if (ctx.in_sb)        pos_adj = 2;
+        else if (!ctx.in_bb) {
+            switch (ctx.dist) {
+                case 0: pos_adj = 3; break;  // BTN
+                case 1: pos_adj = 2; break;  // CO
+                case 2: pos_adj = 1; break;  // HJ
+                case 3: pos_adj = 0; break;  // MP2
+                case 4: pos_adj = -1; break; // MP1
+                case 5: pos_adj = -1; break; // UTG1
+                default: pos_adj = -2; break; // UTG (or shorter table)
+            }
+        }
+        int push_bb = (int)std::round(sbb) + pos_adj;
         if (push_bb < 1) push_bb = 1;
+        if (push_bb > 20) push_bb = 20;
         const Range &pr = g_pre.push_range[push_bb];
+
+        // ICM: with a dominant stack, avoid marginal shoves/calls against a
+        // much shorter stack — bust them and our win probability barely
+        // moves, so it's not worth the variance (fixes leak #3: previously
+        // no code backed the "ICM awareness" comment).
+        bool icm_avoid_marginal = ctx.is_tournament && ctx.icm_risk_premium >= 1.5;
 
         if (ctx.in_bb && !ctx.raised) {
             if (ctx.limpers == 0) return Decision{"check", 0};
             // Limp in front: push with our range
-            if (in_range(pr, hole[0], hole[1])) return allin_(ctx.my_stack, ctx.my_street_bet);
+            if (in_range(pr, hole[0], hole[1]) &&
+                !(icm_avoid_marginal && ctx.icm_win_share > 0.30 && push_bb <= 8))
+                return allin_(ctx.my_stack, ctx.my_street_bet);
             return Decision{"check", 0};
         }
         if (to_call <= 0) {
-            if (in_range(pr, hole[0], hole[1])) return allin_(ctx.my_stack, ctx.my_street_bet);
+            if (in_range(pr, hole[0], hole[1]) &&
+                !(icm_avoid_marginal && ctx.icm_win_share > 0.30 && push_bb <= 8))
+                return allin_(ctx.my_stack, ctx.my_street_bet);
             return Decision{"fold", 0};
         }
-        // Facing a raise: call/all-in vs fold
+        // Facing a raise: pot-odds-based call/fold.
+        // Classic approach: use push_range as a proxy for calling range. Problem:
+        // it ignores the actual bet size, so a 20x overbet gets called the same
+        // as a 2x pot bet. Fix: compute real pot odds, look up our hand's preflop
+        // equity, and require equity > pot_odds + ICM_margin.
         if (to_call >= ctx.my_stack) {
-            // Use push_range as call-off range when short-stacked
-            if (in_range(pr, hole[0], hole[1])) {
-                if (sbb <= 15) return Decision{"call_all", 0};
-            }
-            // Facing a 3-bet all-in, call with decent hands
-            if (in_range(g_pre.call_3b_deep, hole[0], hole[1])) return Decision{"call_all", 0};
-            if (in_range(g_pre.call_3b_med, hole[0], hole[1]) && ctx.hu) return Decision{"call_all", 0};
+            double pot_total = (double)(ctx.pot + to_call); // pot after we call
+            double pot_odds  = pot_total > 0 ? (double)to_call / pot_total : 0.5;
+            double eq        = g_pf_eq[hand_class(hole[0], hole[1])];
+            // ICM margin: larger when we have more equity share to protect.
+            // Heads-up: chip-EV ≈ tournament EV, so very small margin.
+            double icm_margin;
+            if (ctx.hu)        icm_margin = 0.01;
+            else if (sbb <= 8) icm_margin = 0.02;
+            else if (sbb <= 12) icm_margin = 0.04;
+            else               icm_margin = 0.06;
+            // Exploit: vs. a very loose raiser, their range is wider than Nash
+            // implies → our equity is higher → call wider (reduce margin).
+            if (ctx.raiser_model && ctx.raiser_model->vpip > 70)
+                icm_margin = std::max(0.0, icm_margin - 0.03);
+            // ICM: as a dominant chip leader, also fold marginal calls at the
+            // top of the band — busting a much shorter stack barely moves our
+            // win probability, so a bare pot-odds-plus-margin call isn't worth
+            // the tournament-equity risk (fixes leak #3: "ICM awareness" was
+            // previously a comment with no code behind it).
+            bool icm_fold_marginal = icm_avoid_marginal && ctx.icm_win_share > 0.30
+                                      && sbb > 15; // only trims the top of the band
+            if (eq >= pot_odds + icm_margin && !icm_fold_marginal) return Decision{"call_all", 0};
             return Decision{"fold", 0};
         }
         // Has chips behind: push with our push range
-        if (in_range(pr, hole[0], hole[1])) return allin_(ctx.my_stack, ctx.my_street_bet);
+        if (in_range(pr, hole[0], hole[1]) &&
+            !(icm_avoid_marginal && ctx.icm_win_share > 0.30 && push_bb <= 8))
+            return allin_(ctx.my_stack, ctx.my_street_bet);
         return Decision{"fold", 0};
     }
 
@@ -735,14 +842,23 @@ static Decision decide_preflop_full(const PreflopContext &ctx) {
         return Decision{"fold", 0};
     }
 
-    // Determine raiser position tier (0=EP, 1=MP, 2=LP)
+    // Determine which of the three range *tables* to use (EP/MP/LP: we
+    // only hand-tuned three charts). But within a table, don't treat every
+    // raiser seat the same — fixes leak #4: previously all 9 raiser
+    // positions collapsed into exactly 3 buckets with identical play
+    // inside each bucket. Every extra seat of raiser_dist now tightens
+    // our continuation frequency a little further, so e.g. facing UTG
+    // (deepest dist) is measurably tighter than facing UTG+1, even though
+    // both still pull from the same base "EP" chart.
     int tier = ctx.raiser_dist <= 1 ? 2 : (ctx.raiser_dist == 2 ? 1 : 0);
+    double raiser_pos_tighten = 1.0 - 0.035 * std::min(ctx.raiser_dist, 8);
+    if (raiser_pos_tighten < 0.55) raiser_pos_tighten = 0.55;
 
     // Exploit: if raiser is very tight (nit), tighten our call range
-    double call_tighten = 1.0;
+    double call_tighten = raiser_pos_tighten;
     bool raiser_is_nit = false;
     if (ctx.raiser_model && ctx.raiser_model->is_nit()) {
-        call_tighten = 0.7;
+        call_tighten *= 0.7;
         raiser_is_nit = true;
     }
     bool raiser_is_loose = ctx.raiser_model && ctx.raiser_model->is_loose();
@@ -755,16 +871,19 @@ static Decision decide_preflop_full(const PreflopContext &ctx) {
         else if (tier==1) { r3=&g_pre.bb_3b_vs_mp; c3=&g_pre.bb_call_vs_mp; }
         else { r3=&g_pre.bb_3b_vs_lp; c3=&g_pre.bb_call_vs_lp; }
 
-        // Exploit: 3-bet more vs loose, less vs nit
-        double freq_adj = raiser_is_nit ? 0.7 : 1.0;
+        // Exploit: 3-bet more vs loose, less vs nit; also fold slightly
+        // more bluff combos the further back the raiser's seat is.
+        double freq_adj = (raiser_is_nit ? 0.7 : 1.0) * raiser_pos_tighten;
         MixedRange mr_adj = *r3;
         mr_adj.bluff_freq *= freq_adj;
 
         if (should_3bet(mr_adj, hole))
             return Decision{"bet", 3 * ctx.current_bet};
-        // Exploit nit by tightening call range
+        // call_tighten already folds in both the nit exploit and the
+        // per-seat raiser_pos_tighten factor, so every raiser_dist gets a
+        // distinct continuation frequency instead of one of 3 buckets.
         if (in_range(*c3, hole[0], hole[1])) {
-            if (!raiser_is_nit || rand_bool(call_tighten))
+            if (rand_bool(call_tighten))
                 return Decision{"call", 0};
         }
         return Decision{"fold", 0};
@@ -777,10 +896,13 @@ static Decision decide_preflop_full(const PreflopContext &ctx) {
     else if (tier==1) { r3=&g_pre.r3b_vs_mp; c3=&g_pre.call_vs_mp; }
     else { r3=&g_pre.r3b_vs_lp; c3=&g_pre.call_vs_lp; }
 
-    if (should_3bet(*r3, hole))
+    MixedRange mr_open_adj = *r3;
+    mr_open_adj.bluff_freq *= (raiser_is_nit ? 0.7 : 1.0) * raiser_pos_tighten;
+
+    if (should_3bet(mr_open_adj, hole))
         return Decision{"bet", 3 * ctx.current_bet};
     if (in_range(*c3, hole[0], hole[1])) {
-        if (!raiser_is_nit || rand_bool(call_tighten))
+        if (rand_bool(call_tighten))
             return Decision{"call", 0};
     }
     return Decision{"fold", 0};
@@ -912,8 +1034,15 @@ struct PostflopContext {
     int to_call;
     int my_stack;
     int min_raise;
-    // Opponent model (primary opponent, or average)
+    // Opponent model (a representative single opponent, kept for any future
+    // per-opponent range narrowing) plus field-wide aggregated reads that
+    // are correct in multi-way pots (see make_postflop_decision).
     const OppModel *opp_model;
+    bool agg_folds_a_lot;
+    bool agg_calling_station;
+    bool agg_aggressive;
+    bool is_tournament;
+    bool icm_avoid_marginal; // we're a dominant chip leader; skip marginal all-ins
 };
 
 static Decision decide_postflop_full(const PostflopContext &ctx) {
@@ -929,10 +1058,12 @@ static Decision decide_postflop_full(const PostflopContext &ctx) {
     // Margin (safety buffer above pot odds)
     double margin = 0.04 + 0.03 * std::max(0, ctx.nopp - 1);
 
-    // Opponent model adjustments
-    bool opp_folds_a_lot = ctx.opp_model && ctx.opp_model->folds_too_much();
-    bool opp_is_calling_station = ctx.opp_model && ctx.opp_model->is_fish();
-    bool opp_is_aggressive = ctx.opp_model && ctx.opp_model->is_aggressive();
+    // Opponent model adjustments: aggregated across every live, modeled
+    // opponent (see make_postflop_decision) rather than a single seat, so
+    // multi-way pots don't get a read that's only true for one player.
+    bool opp_folds_a_lot = ctx.agg_folds_a_lot;
+    bool opp_is_calling_station = ctx.agg_calling_station;
+    bool opp_is_aggressive = ctx.agg_aggressive;
 
     // ─── Facing a bet ──────────────────────────────────────────────────────
     if (to_call > 0) {
@@ -940,10 +1071,15 @@ static Decision decide_postflop_full(const PostflopContext &ctx) {
 
         // All-in decision
         if (to_call >= ctx.my_stack) {
-            if (eq >= pot_odds + margin) return Decision{"call_all", 0};
+            // ICM: as a dominant chip leader, require a real equity edge
+            // (not just a bare profitable call) before stacking off — the
+            // marginal tournament-equity gain from winning is small relative
+            // to the downside of busting, so add a small extra margin.
+            double icm_margin = (ctx.is_tournament && ctx.icm_avoid_marginal) ? 0.05 : 0.0;
+            if (eq >= pot_odds + margin + icm_margin) return Decision{"call_all", 0};
             // Desperate call with strong draw on flop/turn
             if (ctx.stage < 3 && ctx.hs == HandStrength::STRONG_DRAW &&
-                eq >= pot_odds + margin * 0.5) return Decision{"call_all", 0};
+                eq >= pot_odds + margin * 0.5 + icm_margin) return Decision{"call_all", 0};
             return Decision{"fold", 0};
         }
 
@@ -1512,6 +1648,32 @@ Decision PrometheusBot::make_preflop_decision(GameState &g, const PlayerState &m
     ctx.hole[1] = g.hole[1];
     ctx.raiser_model = raiser_model;
 
+    // ICM context (fixes leak #3: "ICM awareness" was previously just a
+    // comment — no bubble/stack-distribution logic backed it anywhere).
+    ctx.is_tournament = g.is_tournament;
+    ctx.icm_win_share = 0.0;
+    ctx.icm_risk_premium = 0.0;
+    if (g.is_tournament) {
+        int stacks[kMaxSeats];
+        int n = 0, players_left = 0;
+        int opp_stack_vs_us = -1; // stack of the seat we're facing, if any
+        for (int i = 0; i < kMaxSeats; i++) {
+            const PlayerState &p = g.players[i];
+            if (!p.busted && p.seat >= 0) {
+                stacks[n++] = p.stack;
+                players_left++;
+                if (i == raiser_seat) opp_stack_vs_us = p.stack;
+            }
+        }
+        ctx.icm_win_share = icm_win_probability(me.stack, stacks, n);
+        long total = 0;
+        for (int i = 0; i < n; i++) total += stacks[i];
+        double opp_share = (opp_stack_vs_us >= 0 && total > 0)
+                                ? (double)opp_stack_vs_us / (double)total
+                                : ctx.icm_win_share; // no specific opp: neutral
+        ctx.icm_risk_premium = icm_risk_premium(ctx.icm_win_share, opp_share, players_left);
+    }
+
     return decide_preflop_full(ctx);
 }
 
@@ -1535,16 +1697,36 @@ Decision PrometheusBot::make_postflop_decision(GameState &g, const PlayerState &
     if (to_call < 0) to_call = 0;
     double spr = g.pot > 0 ? (double)me.stack / g.pot : 10.0;
 
-    // Find primary opponent model
+    // Aggregate across ALL live, modeled opponents instead of picking
+    // whichever happens to be the first seat found — in a multi-way pot
+    // that "first found" bias meant e.g. a station three seats over could
+    // silently override a read on the one aggressive player actually
+    // driving the action. We keep a representative model (still needed for
+    // ranges.py-equivalent per-opponent range narrowing elsewhere) but the
+    // three yes/no reads below are aggregated across the whole field:
+    //   - opp_folds_a_lot   -> only true if EVERY live opponent folds a lot
+    //                          (a bluff has to get through all of them)
+    //   - opp_is_calling_station -> true if ANY live opponent is a station
+    //                          (at least one will pay off a value bet)
+    //   - opp_is_aggressive -> true if ANY live opponent is aggressive
+    //                          (enough to make us cautious bluff-catching)
     const OppModel *opp_model = nullptr;
+    bool agg_folds_a_lot = true;
+    bool agg_calling_station = false;
+    bool agg_aggressive = false;
+    int modeled_count = 0;
     for (int i=0;i<kMaxSeats;i++) {
         if (i==g.my_seat) continue;
         const PlayerState &p = g.players[i];
         if (!p.busted && !p.folded && p.seat>=0 && opp_models_[i].hands_seen > 5) {
-            opp_model = &opp_models_[i];
-            break;
+            if (!opp_model) opp_model = &opp_models_[i]; // representative, for callers needing a single model
+            modeled_count++;
+            if (!opp_models_[i].folds_too_much()) agg_folds_a_lot = false;
+            if (opp_models_[i].is_fish())         agg_calling_station = true;
+            if (opp_models_[i].is_aggressive())   agg_aggressive = true;
         }
     }
+    if (modeled_count == 0) agg_folds_a_lot = false; // no reads: don't assume anything
 
     bool is_pfr = (was_pfr_ && pfr_epoch_ == hand_epoch_);
 
@@ -1566,6 +1748,26 @@ Decision PrometheusBot::make_postflop_decision(GameState &g, const PlayerState &
     ctx.my_stack = me.stack;
     ctx.min_raise = g.min_raise;
     ctx.opp_model = opp_model;
+    ctx.agg_folds_a_lot = agg_folds_a_lot;
+    ctx.agg_calling_station = agg_calling_station;
+    ctx.agg_aggressive = agg_aggressive;
+
+    // ICM: same win-probability model used preflop (fix parity gap — a
+    // dominant chip leader used to only get ICM caution preflop; a marginal
+    // postflop all-in call/shove is exactly the same kind of unnecessary
+    // variance and should get the same guard).
+    ctx.is_tournament = g.is_tournament;
+    ctx.icm_avoid_marginal = false;
+    if (g.is_tournament) {
+        int stacks[kMaxSeats];
+        int n = 0;
+        for (int i = 0; i < kMaxSeats; i++) {
+            const PlayerState &p = g.players[i];
+            if (!p.busted && p.seat >= 0) stacks[n++] = p.stack;
+        }
+        double my_share = icm_win_probability(me.stack, stacks, n);
+        ctx.icm_avoid_marginal = (my_share > 0.35);
+    }
 
     return decide_postflop_full(ctx);
 }

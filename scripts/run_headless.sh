@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
-# run_tournament.sh — bot-only tournament on the GUI server. Every bot
-# (Prometheus, Titan, Nemesis, PyBot, C++ fillers) fills the seats and the
-# server window shows the table; close the window or press Ctrl+C to stop.
+# run_headless.sh — headless tournament server with all bots in the
+# background and your human GUI client on the last seat in the foreground.
+# Close the client window (or press Ctrl+C) to stop everything.
 #
-# Usage: ./run_tournament.sh [N] [--port PORT] [--level-seconds SECS]
-#                            [--token SECRET] [--no-simulate]
-#   N               total seats (2-10, default 6); N bots are spawned
+# Usage: ./run_headless.sh [N] [--port PORT] [--level-seconds SECS]
+#                          [--token SECRET] [--no-simulate]
+#   N               total seats (2-10, default 6); N-1 bots are spawned
 #   --port PORT     WebSocket port (default 9000)
 #   --level-seconds Blind level duration in seconds (default 120)
 #   --token SECRET  Auth token (passed to server and all bots)
@@ -66,8 +66,8 @@ pkill -9 -f "client/build/client"                  2>/dev/null || true
 sleep 0.5
 
 # ── Build ──────────────────────────────────────────────────────────────────
-echo "==> Building server and bots..."
-make -j"$(getconf _NPROCESSORS_ONLN)" server bot
+echo "==> Building server, bots and client..."
+make -j"$(getconf _NPROCESSORS_ONLN)" server bot client
 
 TOKEN_FLAG=()
 [ -n "$TOKEN" ] && TOKEN_FLAG=(--token "$TOKEN")
@@ -85,12 +85,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ── Start the GUI tournament server ────────────────────────────────────────
+# ── Start the headless tournament server ───────────────────────────────────
 echo ""
-echo "==> Starting tournament server ($PLAYERS seats, GUI, port $PORT, ${LEVEL_SECS}s levels)..."
+echo "==> Starting headless tournament server ($PLAYERS seats, port $PORT, ${LEVEL_SECS}s levels)..."
 
 SERVER_ARGS=(
     --tournament
+    --headless
     --max-players "$PLAYERS"
     --port "$PORT"
     --level-seconds "$LEVEL_SECS"
@@ -98,16 +99,14 @@ SERVER_ARGS=(
 )
 [ -n "$SIMULATE" ] && SERVER_ARGS+=($SIMULATE)
 
-./server/build/server "${SERVER_ARGS[@]}" &
+./server/build/server "${SERVER_ARGS[@]}" > /dev/null 2>&1 &
 SERVER_PID=$!
 PIDS+=("$SERVER_PID")
 sleep 1.2
 
 # ── Spawn bots: Prometheus, Titan, Nemesis, PyBot, then C++ fillers ────────
-# The table needs N players to leave the lobby (countdown fires only when
-# every seat is filled), so all N seats get a bot; you watch the server window.
 BOT_COMMON=(--port "$PORT" "${TOKEN_FLAG[@]}")
-TO_SPAWN=$PLAYERS
+TO_SPAWN=$((PLAYERS - 1))
 
 spawn_bot() {
     local name="$1"
@@ -119,7 +118,7 @@ spawn_bot() {
     sleep 0.3
 }
 
-echo "==> Spawning $PLAYERS bot(s)..."
+echo "==> Spawning $((PLAYERS - 1)) bot(s)..."
 spawn_bot "Prometheus" ./bot/prometheus/build/prometheus "${BOT_COMMON[@]}"
 spawn_bot "Titan"      ./bot/titan/build/titan "${BOT_COMMON[@]}"
 spawn_bot "Nemesis"    bot/nemesis/venv/bin/python bot/nemesis/bot.py "${BOT_COMMON[@]}"
@@ -131,10 +130,8 @@ while [ "$TO_SPAWN" -gt 0 ]; do
 done
 
 echo ""
-echo "==> Tournament running — watch it in the server window."
-echo "==> Close the window or press Ctrl+C to stop."
-
+echo "==> Launching your GUI client on the last seat..."
 set +e
-wait "$SERVER_PID"
+./client/build/client "${BOT_COMMON[@]}" --name "HumanPlayer"
 echo ""
-echo "==> Server exited."
+echo "==> Client closed."

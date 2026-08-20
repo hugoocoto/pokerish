@@ -144,7 +144,8 @@ joins are accepted.
 ```
 
 `scripts/run_tournament.sh` does all of this for you: builds everything, starts a
-6-player tournament server in the background, launches 1 Titan + 2 C++ + 2
-Python bots, and connects your human play client in the foreground. A bot-only
-variant is `scripts/run_bot_tournament.sh` (4-seat tournament, one of each bot,
-no human client).
+6-player tournament on the GUI server and fills the seats with every bot
+(Prometheus, Titan, Nemesis, Python, C++ fillers) — close the window or press
+Ctrl+C to stop. To play yourself instead of watching, `scripts/run_headless.sh`
+runs the same tournament headless with all bots in the background and your
+human GUI client on the last seat.
