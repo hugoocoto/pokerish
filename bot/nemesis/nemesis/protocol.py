@@ -29,6 +29,11 @@ class NemesisBot:
         # Per-position shove opportunity tracking: seat -> {position: had_opportunity}
         # Used to record "declined" shove opportunities at hand end.
         self._shove_opps: dict[int, list[tuple[str, bool]]] = {}  # seat -> [(pos, shoved)]
+        # Track our own preflop aggression so postflop c-bet and 3-bet-pot logic works.
+        self._i_am_pfr: bool = False
+        # Monotonically increasing query request ID (wraps at 16-bit) to avoid
+        # stale replies matching a new query in rapid re-action scenarios.
+        self._req_id_counter: int = 0
 
     async def run(self):
         uri = f"ws://{self.host}:{self.port}"
@@ -102,8 +107,12 @@ class NemesisBot:
             self.gs.update(state_payload["state"])
 
     def _reset_hand_trackers(self):
-        # count a "hand" for every seat that was dealt in, once, at hand end
-        for seat in self.gs.live_seats() or self.gs.active_seats():
+        # Bug #3 fix: count a "hand" for every seated (non-busted) player once at
+        # hand end, not just the players still live (non-folded) at showdown.
+        # Using live_seats() meant folded opponents were never counted, keeping
+        # almost every profile stuck at "unknown" and preventing the fingerprint
+        # exploit from firing after 15+ hands.
+        for seat in self.gs.active_seats():
             if seat != self.gs.my_seat:
                 self.om.get(seat).hands += 1
         self._hand_preflop_acted.clear()
@@ -112,6 +121,7 @@ class NemesisBot:
         self._cbet_seat = None
         self._facing_cbet.clear()
         self._shove_opps.clear()
+        self._i_am_pfr = False
 
     # -- shove opportunity flushing at hand end ---------------------------
 
@@ -203,7 +213,8 @@ class NemesisBot:
             return
 
         d = decide(self.gs, self.om, self.gs.my_seat, hole,
-                   last_raiser_seat=self._hand_last_raiser_seat)
+                   last_raiser_seat=self._hand_last_raiser_seat,
+                   i_am_pfr=self._i_am_pfr)
         log.info("stage=%s pos=%s hole=%s -> %s %s",
                   self.gs.stage, self.gs.position_map().get(self.gs.my_seat),
                   hole, d.action, d.amount)
@@ -213,9 +224,16 @@ class NemesisBot:
             payload["amount"] = max(0, d.amount)
         await self._send(payload)
 
+        # Record our own preflop raise so postflop c-bet and 3-bet-pot response
+        # logic (is_pfr / i_am_pfr) know we were the aggressor.
+        if self.gs.stage == "preflop" and d.action == "bet":
+            self._i_am_pfr = True
+
     async def _query_my_cards(self) -> list[str] | None:
-        # Use a unique request ID per query to avoid id collisions in long sessions.
-        req_id = id(self) & 0xFFFF  # stable per-bot unique-enough ID
+        # Bug #4 fix: use a monotonically incrementing counter instead of a
+        # static hash of self, so rapid back-to-back queries don't collide.
+        self._req_id_counter = (self._req_id_counter + 1) & 0xFFFF
+        req_id = self._req_id_counter
         await self._send({"type": "query", "id": req_id, "what": "my_cards"})
         try:
             while True:

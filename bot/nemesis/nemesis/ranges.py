@@ -1,21 +1,18 @@
 """
 Position-aware hand ranges.
 
-This is Nemesis's answer to Prometheus's biggest confirmed leak: Prometheus's
-push_range[1..20] is indexed ONLY by stack depth, identical from every seat.
-Real Nash push/fold ranges vary a lot by position (UTG at 10bb shoves far
+Push/fold play only by stack depth (ignoring seat) is a common bot leak:
+real Nash push/fold ranges vary a lot by position (UTG at 10bb shoves far
 tighter than the button at 10bb). Here, ranges are indexed by
 (position, stack_depth_bb) so Nemesis plays a different, correct-shaped range
-from every one of the 9 seats.
+from every one of the 9 seats regardless of who's across the table.
 
 The percentages below are a principled approximation built from well known,
 publicly documented push/fold theory (the general shape of Nash/ICM shove
 charts: tight under the gun, exponentially widening toward the button and
 blinds, narrowing again as effective stacks grow past ~15-20bb). They are not
 a from-scratch CFR solve -- treat them as a strong, structurally-correct
-starting point that already fixes Prometheus's two confirmed leaks (position
-blindness, and the 15-20bb under-calling gap), and swap in real solver output
-later if you compute one (see PLAN Phase 2).
+starting point, and swap in real solver output later if you compute one.
 """
 
 from __future__ import annotations
@@ -139,11 +136,12 @@ def push_range(position: str, stack_bb: float) -> set[str]:
     return top_pct(pct)
 
 
-def call_shove_range(position: str, stack_bb: float, num_extra_risk: int = 0) -> set[str]:
+def call_shove_range(position: str, stack_bb: float, num_extra_risk: float = 0.0) -> set[str]:
     """Range to CALL an all-in with (not shove ourselves). Tighter than the
     matching push range because we need enough equity to overcome the caller's
     disadvantage (they can't fold out worse hands the way a shove can).
-    `num_extra_risk` > 0 tightens further (used for ICM risk premium)."""
+    `num_extra_risk` > 0.0 tightens further (used for ICM risk premium, which
+    returns a float from icm.icm_risk_premium)."""
     base = BASE_PUSH_PCT_10BB.get(position, 20.0) * 0.58
     pct = min(100.0, base * _depth_factor(stack_bb))
     pct *= max(0.55, 1.0 - 0.08 * num_extra_risk)
@@ -177,3 +175,41 @@ def call_open_range(position: str, opener_position_idx: int, my_position_idx: in
     ip = my_position_idx > opener_position_idx  # True = we're closing action / in position
     pct = 16.0 if ip else 9.0
     return top_pct(min(100.0, pct + extra_pct))
+
+
+# ---------------------------------------------------------------------------
+# 3-bet pot response: 4-bet / stackoff / call ranges
+# ---------------------------------------------------------------------------
+
+# Hands to 4-bet jam / stackoff when facing a 3-bet (absolute value, always).
+# AK and KK+ are never folded to a 3-bet regardless of stack depth.
+STACKOFF_VS_3BET: set[str] = {"AA", "KK", "AKs", "AKo"}
+
+# Blocker 4-bet bluff candidates: unblock villain's calling range, block AA/KK combos.
+FOURBET_BLUFF_HANDS: set[str] = {"A5s", "A4s", "A3s"}
+
+
+def call_3bet_range(stack_bb: float) -> set[str]:
+    """Hands to flat-call a 3-bet with (not 4-bet, not fold).
+    Gets tighter as effective stack shrinks (lower SPR → calling is near-committing,
+    so we'd rather jam or fold than flat)."""
+    if stack_bb > 50:
+        return top_pct(6.5)   # QQ, JJ, TT, AQs, KQs
+    elif stack_bb > 30:
+        return top_pct(5.0)   # QQ, JJ, AQs
+    else:
+        return top_pct(3.5)   # QQ, JJ only
+
+
+# ---------------------------------------------------------------------------
+# BB iso-raise vs limpers
+# ---------------------------------------------------------------------------
+
+def bb_iso_raise_range(n_limpers: int) -> set[str]:
+    """Range to isolation-raise limpers from the big blind. Wider with fewer
+    limpers (better fold equity), tighter when many have called (we need a stronger
+    hand to overcome multi-way equity dilution).
+    Raising here punishes passive open-limpers and builds pots in position (dealer
+    is behind us but all limpers are in front, so we close the action)."""
+    pct = 26.0 if n_limpers == 1 else (20.0 if n_limpers == 2 else 14.0)
+    return top_pct(pct)

@@ -12,10 +12,8 @@ play:
     P(player i finishes 1st) ~= stack_i / sum(all stacks)
 
 That's a first-order approximation (it ignores skill edge and future blind
-pressure), but it is already exactly what's missing from Prometheus: the
-comment in Prometheus's bot.cpp claims "ICM awareness" but grep of the source
-finds no bubble/payout/stack-distribution logic anywhere. Even this simple
-model gives Nemesis two things Prometheus structurally cannot have:
+pressure), but it gives two things a bot with no ICM logic structurally
+cannot have:
 
   1. Correct recognition that chips are worth LESS marginally as your stack
      grows relative to the field (diminishing returns) -> big stacks should
@@ -66,10 +64,24 @@ def icm_risk_premium(my_stack: int, opp_stack: int, all_stacks: list[int]) -> fl
     return max(0.0, premium)
 
 
-def should_avoid_marginal_spot(my_stack: int, all_stacks: list[int]) -> bool:
+def should_avoid_marginal_spot(my_stack: int, all_stacks: list[int],
+                                stage: str = "river") -> bool:
     """Quick guard used outside of push/fold-table spots (e.g. deep-stack
-    postflop marginal semi-bluff shoves) when we are a clear equity leader."""
+    postflop marginal semi-bluff shoves) when we are a clear equity leader.
+
+    Stage-aware: on the flop there are still two streets of cards to improve,
+    so we can accept more variance (higher threshold required to block us).
+    On the river the hand is final, so we protect our chip-equity lead more.
+    This prevents the guard from over-folding profitable semi-bluffs early."""
     total = sum(all_stacks)
     if total <= 0:
         return False
-    return (my_stack / total) > 0.35
+    share = my_stack / total
+    # Street-specific thresholds: more lenient early, stricter later.
+    threshold = {
+        "preflop": 0.45,  # need a dominant chip lead to tighten preflop
+        "flop":    0.40,  # two streets left; accept more variance
+        "turn":    0.37,  # one street left
+        "river":   0.35,  # final decision; protect equity most aggressively
+    }.get(stage, 0.35)
+    return share > threshold

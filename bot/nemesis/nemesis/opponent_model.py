@@ -1,16 +1,16 @@
 """
-Opponent modeling. Tracks the same core stats Prometheus tracks (VPIP / PFR /
-AF / fold-to-cbet) so Nemesis isn't behind on read quality, plus a couple of
-things Prometheus's own code doesn't have:
+Opponent modeling. Tracks core stats (VPIP / PFR / AF / fold-to-cbet) plus
+two things a lot of simple bots skip:
 
-  - per-position VPIP splits, not just an aggregate (Prometheus's model.cpp-
-    equivalent stats are position-blind)
+  - per-position VPIP splits, not just an aggregate -- lets Nemesis tell
+    "tight overall" apart from "tight only from early position."
   - a lightweight signature check for "this seat's shove frequency barely
-    changes with position" -- the fingerprint of Prometheus's confirmed
-    leak #1. When flagged, Nemesis widens its own calling/3-bet-shove ranges
-    specifically against that seat rather than applying the exploit blindly
-    to everyone (guards against overfitting to Prometheus, per the plan's
-    risk section).
+    changes with position" -- a common leak in bots that index push/fold
+    purely by stack depth and ignore seat. When flagged against a given
+    seat, Nemesis widens its own calling/3-bet-shove range specifically
+    against THAT seat rather than assuming every opponent plays this way
+    (avoids overfitting to one target and keeps the exploit self-adapting
+    to whoever Nemesis is actually seated with).
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -52,8 +52,12 @@ class SeatStats:
         self.shoves_by_position[position] = [c, t + 1]
 
     def looks_position_blind(self) -> bool:
-        """True if shove frequency varies suspiciously little across
-        positions once we have enough samples -- Prometheus's signature."""
+        """True if this seat's observed shove frequency varies suspiciously
+        little across positions once we have enough samples. Real
+        position-aware players shove far more from the button/blinds than
+        under the gun at the same stack depth; a flat rate across positions
+        is a signature of a bot (or human) whose push/fold logic ignores
+        seat entirely."""
         rates = []
         for pos, (c, t) in self.shoves_by_position.items():
             if t >= 4:

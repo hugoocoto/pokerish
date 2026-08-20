@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Nemesis -- a 9-max tournament bot built to beat Prometheus, by directly
-targeting confirmed leaks in bot/prometheus/bot.cpp: position-blind push/fold
-ranges, an under-calling gap in the 15-20bb band, no real ICM despite the
-README claiming it, and coarse 3-tier position bucketing facing a raise.
+Nemesis -- a 9-max tournament bot with fundamentally sound, position-aware
+push/fold, deep-stack, and board-texture-aware postflop play, plus an
+adaptive layer that fingerprints and exploits specific behavioral leaks
+(e.g. position-blind shove frequency) in whichever opponent shows them.
 See README.md in this directory for the full writeup.
 
 Run (from this directory, after creating the venv):
